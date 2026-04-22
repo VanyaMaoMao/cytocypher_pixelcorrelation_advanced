@@ -1,6 +1,6 @@
 ﻿# Cytocypher PixelCorrelation Advanced
 
-Python tools for automated beat/event detection on Cytocypher PixelCorrelation segment workbooks, with optional AFC review workflow and report generation.
+Python tools for automated beat/event detection on Cytocypher PixelCorrelation segment workbooks, with optional secondary contractions (AFC) review workflow and report generation.
 
 ## What this project does
 
