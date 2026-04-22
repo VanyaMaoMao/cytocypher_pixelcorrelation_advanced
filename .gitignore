@@ -1,0 +1,50 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+tmp_*
+
+# Project-generated analysis outputs
+*_arrhythmia_report*.docx
+*_arrhythmia_summary*.xlsx
+*_peak_debug.xlsx
+*_peak_debug.csv
+*_diagnostics/
+*_afc_review_plots/
+*_afc_review_session.json
+*_afc_events.csv
+*_afc_review_log.csv
