@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -38,6 +41,69 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
     return out, y_cols, fs, t0
 
 
+@contextlib.contextmanager
+def atomic_file_path(target_path: Union[str, Path]) -> Iterator[Path]:
+    """
+    Context manager that provides a temporary path for writing.
+    Upon successful exit, the temporary file is atomically moved to target_path.
+    If an exception occurs, the temporary file is cleaned up and the target is untouched.
+    """
+    target = Path(target_path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create a temporary file in the same directory to ensure atomic os.replace
+    fd, tmp_path_str = tempfile.mkstemp(dir=target.parent, prefix=".tmp_")
+    os.close(fd)
+    tmp_path = Path(tmp_path_str)
+    
+    try:
+        yield tmp_path
+        os.replace(tmp_path, target)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def build_output_path(input_path: Union[str, Path], suffix: str) -> str:
+    """
+    Safely build an output path replacing the original extension (.xlsx) 
+    with the given suffix, without relying on simple string replace.
+    """
+    p = Path(input_path)
+    if p.suffix.lower() == ".xlsx":
+        return str(p.with_name(p.stem + suffix))
+    else:
+        return str(p.with_name(p.name + suffix))
+
+
+def check_output_conflicts(input_path: Union[str, Path], output_paths: List[Union[str, Path]]) -> None:
+    """
+    Raises ValueError if any output_path conflicts with input_path.
+    It checks using absolute resolved paths and samefile (where possible).
+    """
+    in_p = Path(input_path).resolve()
+    for out in output_paths:
+        if not out:
+            continue
+        out_p = Path(out).resolve()
+        
+        # simple path match (handles case sensitivity on Windows if paths are resolved properly)
+        if in_p == out_p or str(in_p).lower() == str(out_p).lower():
+            raise ValueError(f"Output path conflicts with input path: {in_p}")
+        
+        # If output file already exists, check samefile
+        if in_p.exists() and out_p.exists():
+            try:
+                if in_p.samefile(out_p):
+                    raise ValueError(f"Output path conflicts with input path (samefile): {in_p}")
+            except OSError:
+                pass
+
+
 def extract_sample_id_from_segment_sheet(file_path: str, sheet_name: str) -> Any:
     try:
         df = pd.read_excel(
@@ -71,10 +137,9 @@ def extract_sample_id_from_segment_sheet(file_path: str, sheet_name: str) -> Any
 
 
 def save_afc_review_session_json(path: str, session: AFCReviewSession) -> None:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(session.to_dict(), f, indent=2, ensure_ascii=True)
+    with atomic_file_path(path) as tmp_path:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(session.to_dict(), f, indent=2, ensure_ascii=True)
 
 
 def load_afc_review_session_json(path: str) -> AFCReviewSession:
@@ -85,88 +150,85 @@ def load_afc_review_session_json(path: str) -> AFCReviewSession:
 
 
 def export_afc_events_csv(path: str, afc_events: List[AFCEvent]) -> None:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if not afc_events:
-        pd.DataFrame(columns=["segment_name", "segment_index", "main_peak_index", "time_s", "amplitude", "source", "review_id"]).to_csv(out_path, index=False)
-        return
-    rows = [x.to_dict() for x in afc_events]
-    pd.DataFrame(rows).sort_values(["segment_index", "main_peak_index", "time_s"]).to_csv(out_path, index=False)
+    with atomic_file_path(path) as tmp_path:
+        if not afc_events:
+            pd.DataFrame(columns=["segment_name", "segment_index", "main_peak_index", "time_s", "amplitude", "source", "review_id"]).to_csv(tmp_path, index=False)
+            return
+        rows = [x.to_dict() for x in afc_events]
+        pd.DataFrame(rows).sort_values(["segment_index", "main_peak_index", "time_s"]).to_csv(tmp_path, index=False)
 
 
 def export_afc_review_log_csv(path: str, decisions: List[AFCSegmentReviewDecision]) -> None:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if not decisions:
-        pd.DataFrame(
-            columns=[
-                "segment_name",
-                "segment_index",
-                "afc_lower_left_value",
-                "afc_lower_right_value",
-                "afc_upper_left_value",
-                "afc_upper_right_value",
-                "x_start_s",
-                "x_end_s",
-                "manual_afc_times_s",
-                "manual_afc_amps",
-                "status",
-            ]
-        ).to_csv(out_path, index=False)
-        return
-    rows = []
-    for d in decisions:
-        row = d.to_dict()
-        row.pop("main_peak_index", None)
-        row.pop("accepted_times_s", None)
-        row.pop("accepted_amps", None)
-        row.pop("rejected_times_s", None)
-        row.pop("rejected_amps", None)
-        row.pop("manual_added_times_s", None)
-        row.pop("manual_added_amps", None)
-        row.pop("notes", None)
-        if "lower_line" in row and "afc_left_value" not in row:
-            row["afc_left_value"] = row.pop("lower_line")
-        if "upper_line" in row and "afc_right_value" not in row:
-            row["afc_right_value"] = row.pop("upper_line")
-        if "afc_lower_left_value" not in row:
-            row["afc_lower_left_value"] = row.get("afc_left_value", np.nan)
-        if "afc_lower_right_value" not in row:
-            row["afc_lower_right_value"] = row.get("afc_right_value", np.nan)
-        if "afc_upper_left_value" not in row:
-            row["afc_upper_left_value"] = row.get("afc_upper_cap", row.get("upper_line", np.nan))
-        if "afc_upper_right_value" not in row:
-            row["afc_upper_right_value"] = row.get("afc_upper_cap", row.get("upper_line", np.nan))
-        row.pop("afc_left_value", None)
-        row.pop("afc_right_value", None)
-        row.pop("afc_upper_cap", None)
-        row.pop("lower_line", None)
-        row.pop("upper_line", None)
-        if "window_start_s" in row and "x_start_s" not in row:
-            row["x_start_s"] = row.pop("window_start_s")
-        if "window_end_s" in row and "x_end_s" not in row:
-            row["x_end_s"] = row.pop("window_end_s")
-        manual_times = (
-            list(d.manual_afc_times_s)
-            if d.manual_afc_times_s
-            else list(d.manual_added_times_s) + list(d.accepted_times_s)
-        )
-        manual_amps = (
-            list(d.manual_afc_amps)
-            if d.manual_afc_amps
-            else list(d.manual_added_amps) + list(d.accepted_amps)
-        )
-        row["manual_afc_times_s"] = ",".join(f"{float(x):.6f}" for x in manual_times)
-        row["manual_afc_amps"] = ",".join(f"{float(x):.6f}" for x in manual_amps)
-        rows.append(row)
-    pd.DataFrame(rows).sort_values(["segment_index"]).to_csv(out_path, index=False)
+    with atomic_file_path(path) as tmp_path:
+        if not decisions:
+            pd.DataFrame(
+                columns=[
+                    "segment_name",
+                    "segment_index",
+                    "afc_lower_left_value",
+                    "afc_lower_right_value",
+                    "afc_upper_left_value",
+                    "afc_upper_right_value",
+                    "x_start_s",
+                    "x_end_s",
+                    "manual_afc_times_s",
+                    "manual_afc_amps",
+                    "status",
+                ]
+            ).to_csv(tmp_path, index=False)
+            return
+        rows = []
+        for d in decisions:
+            row = d.to_dict()
+            row.pop("main_peak_index", None)
+            row.pop("accepted_times_s", None)
+            row.pop("accepted_amps", None)
+            row.pop("rejected_times_s", None)
+            row.pop("rejected_amps", None)
+            row.pop("manual_added_times_s", None)
+            row.pop("manual_added_amps", None)
+            row.pop("notes", None)
+            if "lower_line" in row and "afc_left_value" not in row:
+                row["afc_left_value"] = row.pop("lower_line")
+            if "upper_line" in row and "afc_right_value" not in row:
+                row["afc_right_value"] = row.pop("upper_line")
+            if "afc_lower_left_value" not in row:
+                row["afc_lower_left_value"] = row.get("afc_left_value", np.nan)
+            if "afc_lower_right_value" not in row:
+                row["afc_lower_right_value"] = row.get("afc_right_value", np.nan)
+            if "afc_upper_left_value" not in row:
+                row["afc_upper_left_value"] = row.get("afc_upper_cap", row.get("upper_line", np.nan))
+            if "afc_upper_right_value" not in row:
+                row["afc_upper_right_value"] = row.get("afc_upper_cap", row.get("upper_line", np.nan))
+            row.pop("afc_left_value", None)
+            row.pop("afc_right_value", None)
+            row.pop("afc_upper_cap", None)
+            row.pop("lower_line", None)
+            row.pop("upper_line", None)
+            if "window_start_s" in row and "x_start_s" not in row:
+                row["x_start_s"] = row.pop("window_start_s")
+            if "window_end_s" in row and "x_end_s" not in row:
+                row["x_end_s"] = row.pop("window_end_s")
+            manual_times = (
+                list(d.manual_afc_times_s)
+                if d.manual_afc_times_s
+                else list(d.manual_added_times_s) + list(d.accepted_times_s)
+            )
+            manual_amps = (
+                list(d.manual_afc_amps)
+                if d.manual_afc_amps
+                else list(d.manual_added_amps) + list(d.accepted_amps)
+            )
+            row["manual_afc_times_s"] = ",".join(f"{float(x):.6f}" for x in manual_times)
+            row["manual_afc_amps"] = ",".join(f"{float(x):.6f}" for x in manual_amps)
+            rows.append(row)
+        pd.DataFrame(rows).sort_values(["segment_index"]).to_csv(tmp_path, index=False)
 
 
 def export_peak_debug_csv(path: str, peak_debug_df: pd.DataFrame) -> None:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if peak_debug_df is None or peak_debug_df.empty:
-        pd.DataFrame(
+    with atomic_file_path(path) as tmp_path:
+        if peak_debug_df is None or peak_debug_df.empty:
+            pd.DataFrame(
             columns=[
                 "segment_name",
                 "segment_index",
@@ -185,44 +247,43 @@ def export_peak_debug_csv(path: str, peak_debug_df: pd.DataFrame) -> None:
                 "survived_interbeat_tiny_filter",
                 "survived_rescue_stage",
                 "final_label",
-                "rejection_reason",
-                "notes",
-            ]
-        ).to_csv(out_path, index=False)
-        return
-    peak_debug_df.to_csv(out_path, index=False)
-
-
-def export_peak_debug_xlsx(path: str, peak_debug_df: pd.DataFrame, summary_df: Optional[pd.DataFrame] = None) -> None:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        if peak_debug_df is None or peak_debug_df.empty:
-            export_df = pd.DataFrame(
-                columns=[
-                    "segment_name",
-                    "segment_index",
-                    "peak_index_raw",
-                    "time_s",
-                    "amplitude",
-                    "prominence",
-                    "width_s",
-                    "transient_index",
-                    "stage_first_seen",
-                    "survived_raw_filter",
-                    "survived_main_candidate_stage",
-                    "survived_dedup_stage",
-                    "survived_short_gap_prune",
-                    "survived_local_weak_prune",
-                    "survived_interbeat_tiny_filter",
-                    "survived_rescue_stage",
-                    "final_label",
                     "rejection_reason",
                     "notes",
                 ]
-            )
-        else:
-            export_df = peak_debug_df
-        export_df.to_excel(writer, sheet_name="peak_debug", index=False)
-        if summary_df is not None and not summary_df.empty:
-            summary_df.to_excel(writer, sheet_name="peak_debug_summary", index=False)
+            ).to_csv(tmp_path, index=False)
+            return
+        peak_debug_df.to_csv(tmp_path, index=False)
+
+
+def export_peak_debug_xlsx(path: str, peak_debug_df: pd.DataFrame, summary_df: Optional[pd.DataFrame] = None) -> None:
+    with atomic_file_path(path) as tmp_path:
+        with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+            if peak_debug_df is None or peak_debug_df.empty:
+                export_df = pd.DataFrame(
+                    columns=[
+                        "segment_name",
+                        "segment_index",
+                        "peak_index_raw",
+                        "time_s",
+                        "amplitude",
+                        "prominence",
+                        "width_s",
+                        "transient_index",
+                        "stage_first_seen",
+                        "survived_raw_filter",
+                        "survived_main_candidate_stage",
+                        "survived_dedup_stage",
+                        "survived_short_gap_prune",
+                        "survived_local_weak_prune",
+                        "survived_interbeat_tiny_filter",
+                        "survived_rescue_stage",
+                        "final_label",
+                        "rejection_reason",
+                        "notes",
+                    ]
+                )
+            else:
+                export_df = peak_debug_df
+            export_df.to_excel(writer, sheet_name="peak_debug", index=False)
+            if summary_df is not None and not summary_df.empty:
+                summary_df.to_excel(writer, sheet_name="peak_debug_summary", index=False)

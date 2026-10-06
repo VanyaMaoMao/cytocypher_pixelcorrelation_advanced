@@ -12,6 +12,7 @@ from docx import Document
 from docx.shared import Inches
 from scipy.signal import peak_prominences, peak_widths
 
+from .io_utils import atomic_file_path
 from .plotting import plot_afc_review_item
 from .results import AFCEvent, AFCSegmentReviewItem, _format_events_df_for_report, _format_rescue_df_for_report
 
@@ -410,7 +411,8 @@ def build_raw_cytocypher_docx_report(
                 seg_events_df = _format_float_columns(seg_events_df, cols=["Amp", "Prom", "Width_s"], ndigits=5)
                 _add_dataframe_to_docx(doc, seg_events_df.reset_index(drop=True))
 
-    doc.save(output_docx)
+    with atomic_file_path(output_docx) as tmp_path:
+        doc.save(tmp_path)
 
 
 def _collect_main_events_table(segment_results: Sequence[Dict]) -> pd.DataFrame:
@@ -619,9 +621,10 @@ def build_arrhythmia_summary_workbook(
         )
     review_log_public = review_log_df.drop(columns=["manual_afc_times_s", "manual_afc_amps"], errors="ignore").copy()
 
-    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
-        summary_clean_df.to_excel(writer, index=False, sheet_name="summary")
-        main_events_df.to_excel(writer, index=False, sheet_name="main_events")
-        afc_events_df.to_excel(writer, index=False, sheet_name="afc_events")
-        review_log_public.to_excel(writer, index=False, sheet_name="review_log")
+    with atomic_file_path(output_xlsx) as tmp_path:
+        with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+            summary_clean_df.to_excel(writer, index=False, sheet_name="summary")
+            main_events_df.to_excel(writer, index=False, sheet_name="main_events")
+            afc_events_df.to_excel(writer, index=False, sheet_name="afc_events")
+            review_log_public.to_excel(writer, index=False, sheet_name="review_log")
 

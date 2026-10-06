@@ -20,6 +20,8 @@ from .analysis import (
 )
 from .config import AFCReviewConfig, BeatCounterConfig
 from .io_utils import (
+    build_output_path,
+    check_output_conflicts,
     export_afc_events_csv,
     export_afc_review_log_csv,
     export_peak_debug_csv,
@@ -164,9 +166,16 @@ def analyze_workbook_auto_only(
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
 
     if output_docx is None:
-        output_docx = raw_xlsx_path.replace(".xlsx", "_arrhythmia_report.docx")
+        output_docx = build_output_path(raw_xlsx_path, "_arrhythmia_report.docx")
     if output_summary_xlsx is None:
-        output_summary_xlsx = raw_xlsx_path.replace(".xlsx", "_arrhythmia_summary.xlsx")
+        output_summary_xlsx = build_output_path(raw_xlsx_path, "_arrhythmia_summary.xlsx")
+
+    # Ensure output files do not collide with the input file
+    conflicting_paths = [output_docx, output_summary_xlsx]
+    if debug_peak_trace:
+        pd_paths = _default_peak_debug_paths(raw_xlsx_path)
+        conflicting_paths.extend([pd_paths["xlsx"], pd_paths["csv"]])
+    check_output_conflicts(raw_xlsx_path, conflicting_paths)
 
     segment_results = _run_auto_segment_analysis(
         raw_xlsx_path=raw_xlsx_path,
@@ -206,20 +215,18 @@ def analyze_workbook_auto_only(
 
 
 def _default_afc_paths(raw_xlsx_path: str) -> Dict[str, str]:
-    base = str(Path(raw_xlsx_path).with_suffix(""))
     return {
-        "session_json": f"{base}_afc_review_session.json",
-        "events_csv": f"{base}_afc_events.csv",
-        "review_log_csv": f"{base}_afc_review_log.csv",
-        "plots_dir": f"{base}_afc_review_plots",
+        "session_json": build_output_path(raw_xlsx_path, "_afc_review_session.json"),
+        "events_csv": build_output_path(raw_xlsx_path, "_afc_events.csv"),
+        "review_log_csv": build_output_path(raw_xlsx_path, "_afc_review_log.csv"),
+        "plots_dir": build_output_path(raw_xlsx_path, "_afc_review_plots"),
     }
 
 
 def _default_peak_debug_paths(raw_xlsx_path: str) -> Dict[str, str]:
-    base = str(Path(raw_xlsx_path).with_suffix(""))
     return {
-        "xlsx": f"{base}_peak_debug.xlsx",
-        "csv": f"{base}_peak_debug.csv",
+        "xlsx": build_output_path(raw_xlsx_path, "_peak_debug.xlsx"),
+        "csv": build_output_path(raw_xlsx_path, "_peak_debug.csv"),
     }
 
 
@@ -354,9 +361,16 @@ def analyze_workbook_with_afc_review(
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
 
     if output_docx is None:
-        output_docx = raw_xlsx_path.replace(".xlsx", "_arrhythmia_report.docx")
+        output_docx = build_output_path(raw_xlsx_path, "_arrhythmia_report.docx")
     if output_summary_xlsx is None:
-        output_summary_xlsx = raw_xlsx_path.replace(".xlsx", "_arrhythmia_summary.xlsx")
+        output_summary_xlsx = build_output_path(raw_xlsx_path, "_arrhythmia_summary.xlsx")
+
+    # Ensure output files do not collide with the input file
+    conflicting_paths = [output_docx, output_summary_xlsx]
+    if debug_peak_trace:
+        pd_paths = _default_peak_debug_paths(raw_xlsx_path)
+        conflicting_paths.extend([pd_paths["xlsx"], pd_paths["csv"]])
+    check_output_conflicts(raw_xlsx_path, conflicting_paths)
     afc_paths = _default_afc_paths(raw_xlsx_path)
 
     segment_results = _run_auto_segment_analysis(

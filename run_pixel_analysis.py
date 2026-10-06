@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
 
+from pixel_counter.io_utils import build_output_path
+
 from pixel_counter import (
     AFCReviewConfig,
     BeatCounterConfig,
@@ -43,8 +45,9 @@ def main() -> None:
     stim_hz = 1.0
     recording_s = 10.0
 
-    report_docx = raw_path.replace(".xlsx", "_arrhythmia_report.docx")
-    summary_xlsx = raw_path.replace(".xlsx", "_arrhythmia_summary.xlsx")
+    report_docx = build_output_path(raw_path, "_arrhythmia_report.docx")
+    summary_xlsx = build_output_path(raw_path, "_arrhythmia_summary.xlsx")
+    diagnostics_dir = build_output_path(raw_path, "_diagnostics").replace(" ", "_")
 
     auto_config = BeatCounterConfig(sensitivity=1.2)
     afc_config = AFCReviewConfig(
@@ -61,7 +64,7 @@ def main() -> None:
             afc_config=afc_config,
             output_docx=report_docx,
             output_summary_xlsx=summary_xlsx,
-            diagnostics_dir=raw_path.replace(".xlsx", "").replace(" ", "_") + "_diagnostics",
+            diagnostics_dir=diagnostics_dir,
             debug=False,
             debug_peak_trace=bool(args.debug_peak_trace),
             show_plots=False,
@@ -75,7 +78,7 @@ def main() -> None:
             config=auto_config,
             output_docx=report_docx,
             output_summary_xlsx=summary_xlsx,
-            diagnostics_dir=raw_path.replace(".xlsx", "").replace(" ", "_") + "_diagnostics",
+            diagnostics_dir=diagnostics_dir,
             debug=True,
             debug_peak_trace=True,
             show_plots=False,
@@ -88,21 +91,19 @@ def main() -> None:
     print(summary_xlsx)
 
     if args.afc_review:
-        base = raw_path.replace(".xlsx", "")
         print("\nAFC session JSON:")
-        print(base + "_afc_review_session.json")
+        print(build_output_path(raw_path, "_afc_review_session.json"))
         print("\nAFC events CSV:")
-        print(base + "_afc_events.csv")
+        print(build_output_path(raw_path, "_afc_events.csv"))
         print("\nAFC review log CSV:")
-        print(base + "_afc_review_log.csv")
+        print(build_output_path(raw_path, "_afc_review_log.csv"))
         print("\nAFC review plots dir:")
-        print(base + "_afc_review_plots")
+        print(build_output_path(raw_path, "_afc_review_plots"))
     if args.debug_peak_trace:
-        base = raw_path.replace(".xlsx", "")
         print("\nPeak debug XLSX:")
-        print(base + "_peak_debug.xlsx")
+        print(build_output_path(raw_path, "_peak_debug.xlsx"))
         print("\nPeak debug CSV:")
-        print(base + "_peak_debug.csv")
+        print(build_output_path(raw_path, "_peak_debug.csv"))
 
 
 if __name__ == "__main__":
