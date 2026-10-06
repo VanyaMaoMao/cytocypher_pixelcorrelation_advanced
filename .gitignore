@@ -48,3 +48,5 @@ tmp_*
 *_afc_review_session.json
 *_afc_events.csv
 *_afc_review_log.csv
+dummy_report.docx
+dummy_summary.xlsx
