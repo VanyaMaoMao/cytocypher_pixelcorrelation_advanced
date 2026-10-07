@@ -446,22 +446,34 @@ def _make_summary_dataframe(segment_results: List[Dict], stim_hz: float, recordi
         n_primary = int(item.get("n_main_primary", n_total))
         n_rescue = int(item.get("n_rescue", 0))
         bpm_user_exact = float((n_total / recording_s) * 60.0) if recording_s > 0 else 0.0
+        qc_reason = str(meta.get("qc_reason", "unknown"))
+        if bool(meta.get("qc_pass", False)):
+            status = "PASS"
+        elif qc_reason.startswith("runtime_error_"):
+            status = "ERROR"
+        else:
+            status = "REJECT"
+
+        accepted_bpm = float(bpm_user_exact) if status == "PASS" else np.nan
+        accepted_events = n_total if status == "PASS" else np.nan
+
         row = {
             "Segment": item["sheet_name"],
-            "QC": "PASS" if bool(meta.get("qc_pass", False)) else "REJECT",
-            "QC reason": str(meta.get("qc_reason", "unknown")),
-            "BPM (using user duration)": float(bpm_user_exact),
-            # Explicit, unambiguous breakdown for human-readable report tables.
+            "Status": status,
+            "QC reason": qc_reason,
+            "Accepted BPM": accepted_bpm,
+            "Accepted events": accepted_events,
+            "Diagnostic BPM": float(bpm_user_exact),
+            "Diagnostic events": n_total,
             "Primary main beats": n_primary,
             "Rescue peaks": n_rescue,
             "Total detected events": n_total,
-            # Explicit machine-friendly columns for downstream filtering/pivoting in XLSX.
             "primary_main_beats": n_primary,
             "rescue_peaks": n_rescue,
             "total_detected_events": n_total,
-            # Backward-compatibility legacy name; equal to total detected events.
             "Main beats": n_total,
         }
+        
         if stim_hz > 0 and np.isfinite(expected):
             ratio = float(n_total / expected) if expected > 0 else np.nan
             row["Expected beats (Hz x seconds)"] = float(expected)
@@ -473,9 +485,12 @@ def _make_summary_dataframe(segment_results: List[Dict], stim_hz: float, recordi
         return pd.DataFrame(
             columns=[
                 "Segment",
-                "QC",
+                "Status",
                 "QC reason",
-                "BPM (using user duration)",
+                "Accepted BPM",
+                "Accepted events",
+                "Diagnostic BPM",
+                "Diagnostic events",
                 "Primary main beats",
                 "Rescue peaks",
                 "Total detected events",

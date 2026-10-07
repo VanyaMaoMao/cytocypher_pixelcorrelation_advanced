@@ -14,3 +14,9 @@
 - Created an `atomic_file_path` context manager to write output safely to a temporary location before atomically swapping.
 - Protected outputs in `io_utils.py` and `reporting.py` with `atomic_file_path`.
 - Added IO regression tests in `tests/test_io.py`.
+
+## 03. ERROR and REJECT are not equal to 0 BPM
+- Modified `_make_summary_dataframe` in `pixel_counter/results.py` to add explicit `Status` field (`PASS`, `REJECT`, `ERROR`).
+- Created separate fields for accepted results (`Accepted BPM`, `Accepted events`) and diagnostic results (`Diagnostic BPM`, `Diagnostic events`). Accepted fields are set to `NaN` when status is not `PASS`.
+- Updated `run_pixel_analysis.py` to return exit code 1 if any `ERROR` status is found in the summary dataframe, ensuring batch processing reports partial failures correctly.
+- Added regression tests in `tests/test_run_pixel_analysis.py` to verify exit codes and dataframes formats.

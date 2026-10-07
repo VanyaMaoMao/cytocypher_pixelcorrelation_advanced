@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 
 from pixel_counter.io_utils import build_output_path
@@ -104,6 +105,9 @@ def main() -> None:
         print(build_output_path(raw_path, "_peak_debug.xlsx"))
         print("\nPeak debug CSV:")
         print(build_output_path(raw_path, "_peak_debug.csv"))
+
+    if "Status" in summary_df.columns and (summary_df["Status"] == "ERROR").any():
+        sys.exit(1)
 
 
 if __name__ == "__main__":
