@@ -107,6 +107,8 @@ def _row_corr_median(rows: List[np.ndarray]) -> float:
     if len(rows) < 2:
         return np.nan
     min_len = min(len(r) for r in rows)
+    if min_len < 2:
+        return np.nan
     norm = []
     for r in rows:
         x = np.asarray(r[:min_len], dtype=float)

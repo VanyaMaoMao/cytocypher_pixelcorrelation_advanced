@@ -20,3 +20,9 @@
 - Created separate fields for accepted results (`Accepted BPM`, `Accepted events`) and diagnostic results (`Diagnostic BPM`, `Diagnostic events`). Accepted fields are set to `NaN` when status is not `PASS`.
 - Updated `run_pixel_analysis.py` to return exit code 1 if any `ERROR` status is found in the summary dataframe, ensuring batch processing reports partial failures correctly.
 - Added regression tests in `tests/test_run_pixel_analysis.py` to verify exit codes and dataframes formats.
+
+## 04. Fix crash missing Begin fallback
+- Identified that `build_concatenated_signal` caused a `NameError` on fallback processing when no `Begin` column exists, because of a missing `re` import.
+- Added missing `re` import to `pixel_counter/preprocessing.py`.
+- Added test in `tests/test_preprocessing.py` to ensure fallback processing paths resolve without crashes.
+- Fixed a secondary crash in `pixel_counter/qc.py::_row_corr_median` which occurs during `np.corrcoef` calculation if the input has fewer than 2 elements.
