@@ -26,3 +26,10 @@
 - Added missing `re` import to `pixel_counter/preprocessing.py`.
 - Added test in `tests/test_preprocessing.py` to ensure fallback processing paths resolve without crashes.
 - Fixed a secondary crash in `pixel_counter/qc.py::_row_corr_median` which occurs during `np.corrcoef` calculation if the input has fewer than 2 elements.
+
+## 05. Remove user-facing AFC workflow
+- Removed AFC review arguments (`--afc-review`, `--afc-interactive`, `--afc-resume`) from `run_pixel_analysis.py`, returning a clear error if used.
+- Removed unused imports and references from CLI and `pixel_counter/__init__.py`.
+- Updated output report naming in CLI from `_arrhythmia_*` to `_contraction_*`.
+- Updated `README.md` to reflect the removal of AFC and the new output file names.
+- Updated `test_run_pixel_analysis.py` to assert correct exit codes and tests without the legacy mock `analyze_workbook_with_afc_review`.

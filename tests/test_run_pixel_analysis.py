@@ -7,9 +7,7 @@ import numpy as np
 
 from pixel_counter import (
     analyze_raw_cytocypher_workbook,
-    analyze_workbook_with_afc_review,
-    BeatCounterConfig,
-    AFCReviewConfig
+    BeatCounterConfig
 )
 
 from pixel_counter.results import _make_summary_dataframe
@@ -23,42 +21,6 @@ def test_analyze_raw_cytocypher_workbook_mock(mock_auto):
         raw_xlsx_path="dummy.xlsx",
         stim_hz=1.0,
         recording_s=10.0,
-    )
-    assert res.equals(dummy_df)
-
-@patch("pixel_counter.workbook._run_auto_segment_analysis")
-@patch("pixel_counter.workbook.build_afc_segment_review_items")
-@patch("pixel_counter.workbook.launch_afc_review_session")
-@patch("pixel_counter.workbook.merge_afc_segment_decisions_with_results")
-@patch("pixel_counter.workbook._make_summary_dataframe")
-@patch("pixel_counter.workbook.build_arrhythmia_summary_workbook")
-@patch("pixel_counter.workbook.build_raw_cytocypher_docx_report")
-@patch("pixel_counter.workbook.save_afc_review_session_json")
-@patch("pixel_counter.workbook.export_afc_events_csv")
-@patch("pixel_counter.workbook.export_afc_review_log_csv")
-@patch("pixel_counter.workbook.os.makedirs")
-def test_analyze_workbook_with_afc_review_mock(
-    mock_makedirs,
-    mock_export_log, mock_export_events, mock_save_session,
-    mock_build_docx, mock_build_xlsx,
-    mock_make_summary, mock_merge, mock_launch, mock_build_items, mock_run_auto
-):
-    dummy_df = pd.DataFrame([{"segment_index": 1, "test": "val"}])
-    mock_run_auto.return_value = []
-    mock_build_items.return_value = []
-    
-    mock_session = MagicMock()
-    mock_session.decisions = []
-    mock_launch.return_value = mock_session
-    
-    mock_merge.return_value = ([], [], pd.DataFrame())
-    mock_make_summary.return_value = dummy_df
-
-    res = analyze_workbook_with_afc_review(
-        raw_xlsx_path="dummy.xlsx",
-        stim_hz=1.0,
-        recording_s=10.0,
-        afc_config=AFCReviewConfig(enabled=True)
     )
     assert res.equals(dummy_df)
 
@@ -114,8 +76,7 @@ def test_cli_exit_code_missing_args():
 
 
 @patch("run_pixel_analysis.analyze_raw_cytocypher_workbook")
-@patch("run_pixel_analysis.analyze_workbook_with_afc_review")
-def test_cli_exit_code_1_on_error(mock_afc, mock_raw):
+def test_cli_exit_code_1_on_error(mock_raw):
     # Mocking a summary dataframe with an ERROR status
     df_error = pd.DataFrame([{"Segment": "Seg1", "Status": "ERROR", "Diagnostic BPM": 0.0}])
     mock_raw.return_value = df_error
@@ -128,8 +89,7 @@ def test_cli_exit_code_1_on_error(mock_afc, mock_raw):
         assert e.value.code == 1
 
 @patch("run_pixel_analysis.analyze_raw_cytocypher_workbook")
-@patch("run_pixel_analysis.analyze_workbook_with_afc_review")
-def test_cli_exit_code_0_on_success(mock_afc, mock_raw):
+def test_cli_exit_code_0_on_success(mock_raw):
     # Mocking a summary dataframe with a PASS and REJECT status, but NO ERROR
     df_pass_reject = pd.DataFrame([
         {"Segment": "Seg1", "Status": "PASS", "Diagnostic BPM": 60.0},
