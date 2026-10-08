@@ -112,15 +112,24 @@ def _row_corr_median(rows: List[np.ndarray]) -> float:
     norm = []
     for r in rows:
         x = np.asarray(r[:min_len], dtype=float)
-        x = x - np.median(x)
-        sd = float(np.std(x))
+        x = x - np.nanmedian(x)
+        sd = float(np.nanstd(x))
         if sd > 1e-12:
             x = x / sd
         norm.append(x)
+    
+    # Check what indices have finite values in all rows
+    valid_cols = np.ones(min_len, dtype=bool)
+    for x in norm:
+        valid_cols &= np.isfinite(x)
+    
+    if np.sum(valid_cols) < 2:
+        return np.nan
+        
     corrs = []
     for i in range(len(norm)):
         for j in range(i + 1, len(norm)):
-            c = float(np.corrcoef(norm[i], norm[j])[0, 1])
+            c = float(np.corrcoef(norm[i][valid_cols], norm[j][valid_cols])[0, 1])
             if np.isfinite(c):
                 corrs.append(c)
     return float(np.median(corrs)) if corrs else np.nan
@@ -176,8 +185,7 @@ def compute_sheet_structure_features(df: pd.DataFrame, y_cols: Sequence[str], fs
     rows = []
     for _, row in df.iterrows():
         tr = row[list(y_cols)].values.astype(float)
-        tr = tr[~np.isnan(tr)]
-        if tr.size > 0:
+        if not np.all(np.isnan(tr)):
             rows.append(-tr if invert_all else tr)
     if not rows:
         return {"n_rows": 0}
@@ -192,8 +200,15 @@ def compute_sheet_structure_features(df: pd.DataFrame, y_cols: Sequence[str], fs
     strengths = []
     row_per = []
     for r in rows_bs:
+        finite_mask = np.isfinite(r)
+        if np.sum(finite_mask) < 2:
+            strengths.append(0.0)
+            row_per.append(0.0)
+            continue
+            
+        r_finite = r[finite_mask]
         nm = estimate_noise_mad(r)
-        sm = moving_average_smooth(r, fs, smooth_ms=14.0)
+        sm = moving_average_smooth(r_finite, fs, smooth_ms=14.0)
         p, props = find_peaks(sm, prominence=max(0.75 * noise_mad, 2.2 * nm, 0.006), distance=max(1, int(0.08 * fs)), width=max(2, int(0.01 * fs)))
         if p.size:
             strength = float(np.max(props["prominences"]) / max(nm, 1e-12))

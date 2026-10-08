@@ -47,3 +47,9 @@
 - Added explicit parsing and validation of `Sampling Frequency` array to throw errors on missing/NaN, zero, negative, or multiple conflicting frequency values.
 - Updated `extract_sample_id_from_segment_sheet` and `load_cytocypher_excel` to explicitly error on multiple conflicting Sample IDs on a single sheet, removing the previous silent fallback (majority vote).
 - Authored tests in `test_io_excel.py`, `test_io_excel_validation.py`, and `test_extract_sample_id.py`.
+
+## 09. NaN does not drop time position
+- Modified `build_concatenated_signal` in `pixel_counter/preprocessing.py` to stop using `tr[~np.isnan(tr)]` when parsing raw traces. This ensures that internal missing values do not shift the timestamps of subsequent events and gaps are preserved.
+- Removed the gap interpolation logic so that gaps remain as NaNs, maintaining invalid representation instead of fabricating data points.
+- Refactored orientation-finding features like `_row_dominant_direction`, `choose_orientation_make_peaks_positive`, and `_row_corr_median` to properly handle NumPy arrays that have `NaN` elements by switching to nan-safe routines or properly masking inputs prior to calculation.
+- Added tests asserting that missing values in the form of NaNs do not discard the element position.

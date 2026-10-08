@@ -12,7 +12,10 @@ from scipy.stats import median_abs_deviation
 from .config import BeatCounterConfig
 
 def baseline_shift_percentile(sig: np.ndarray, p: float = 5.0) -> np.ndarray:
-    return np.asarray(sig, dtype=float) - float(np.percentile(sig, p))
+    finite_mask = np.isfinite(sig)
+    if not np.any(finite_mask):
+        return np.asarray(sig, dtype=float)
+    return np.asarray(sig, dtype=float) - float(np.percentile(sig[finite_mask], p))
 
 def _rolling_quantile_trend(sig: np.ndarray, fs: float, window_s: float, quantile: float) -> np.ndarray:
     s = np.asarray(sig, dtype=float)
@@ -179,10 +182,13 @@ def compute_spike_fraction(sig: np.ndarray, z_thr: float = 8.0) -> float:
     return float(np.mean(z > z_thr))
 
 def _row_dominant_direction(trace: np.ndarray) -> str:
-    x = np.asarray(trace, dtype=float) - np.median(trace)
-    if x.size == 0 or np.max(np.abs(x)) < 1e-12:
+    x = np.asarray(trace, dtype=float)
+    if x.size == 0 or np.all(np.isnan(x)):
         return "flat"
-    return "down" if abs(np.min(x)) > abs(np.max(x)) else "up"
+    x = x - np.nanmedian(x)
+    if np.nanmax(np.abs(x)) < 1e-12:
+        return "flat"
+    return "down" if abs(np.nanmin(x)) > abs(np.nanmax(x)) else "up"
 
 def choose_orientation_make_peaks_positive(
     sig: np.ndarray,
@@ -194,19 +200,20 @@ def choose_orientation_make_peaks_positive(
     conf_min: float,
 ) -> Tuple[np.ndarray, Dict]:
     sig = np.asarray(sig, dtype=float)
-    if sig.size == 0:
+    sig_finite = sig[np.isfinite(sig)]
+    if sig_finite.size == 0:
         return sig.copy(), {"invert": False, "method": "empty", "vote_conf": np.nan}
 
     edge_n = int(edge_s * fs)
-    if sig.size < 2 * edge_n + 50:
-        edge_n = max(0, min(edge_n, sig.size // 10))
-    core = sig[edge_n : sig.size - edge_n] if (sig.size - 2 * edge_n) > 50 else sig.copy()
+    if sig_finite.size < 2 * edge_n + 50:
+        edge_n = max(0, min(edge_n, sig_finite.size // 10))
+    core = sig_finite[edge_n : sig_finite.size - edge_n] if (sig_finite.size - 2 * edge_n) > 50 else sig_finite.copy()
     x = core - np.median(core)
 
-    win_s = float(np.clip(sig.size / max(fs, 1e-9) * 0.35, 1.5, 8.0))
+    win_s = float(np.clip(sig_finite.size / max(fs, 1e-9) * 0.35, 1.5, 8.0))
     trend = _rolling_quantile_trend(x, fs, window_s=win_s, quantile=0.20)
     if np.isfinite(trend).any():
-        x = x - (trend - float(np.median(trend[np.isfinite(trend)])))
+        x = x - (trend - float(np.nanmedian(trend)))
 
     k = max(5, int(round((smooth_ms / 1000.0) * fs)))
     if k % 2 == 0:
@@ -334,7 +341,8 @@ def build_concatenated_signal(
     row_entries: List[Dict] = []
     for ridx, row in df.iterrows():
         tr = row[y_cols].values.astype(float)
-        tr = tr[~np.isnan(tr)]
+        if np.all(np.isnan(tr)):
+            continue
         if tr.size == 0:
             continue
         begin = pd.to_numeric(row.get("Begin", np.nan), errors="coerce")
@@ -485,7 +493,8 @@ def build_concatenated_signal(
             row_offsets.append(0.0)
             continue
 
-        overlap_mask = weights[s:e] > 0
+        valid_tr = np.isfinite(tr)
+        overlap_mask = (weights[s:e] > 0) & valid_tr
         if int(np.sum(overlap_mask)) >= 5:
             base_overlap = accum[s:e][overlap_mask] / np.maximum(weights[s:e][overlap_mask], 1e-12)
             delta = float(np.median(base_overlap - tr[overlap_mask]))
@@ -494,8 +503,8 @@ def build_concatenated_signal(
         else:
             row_offsets.append(0.0)
 
-        accum[s:e] += tr
-        weights[s:e] += 1.0
+        accum[s:e][valid_tr] += tr[valid_tr]
+        weights[s:e][valid_tr] += 1.0
 
     valid = weights > 0
     if not np.any(valid):
@@ -524,13 +533,8 @@ def build_concatenated_signal(
                 run_start = gi_i
             run_prev = gi_i
         stitched_gap_ranges_samples.append([int(run_start), int(run_prev + 1)])
-    if internal_gap_count > 0:
-        idx = np.arange(blended.size, dtype=float)
-        valid_idx = np.where(np.isfinite(blended))[0]
-        if valid_idx.size >= 2:
-            blended = np.interp(idx, valid_idx.astype(float), blended[valid_idx].astype(float))
-        else:
-            blended = np.nan_to_num(blended, nan=0.0)
+    # Step 09: do not interpolate internal missing values. Leave them as np.nan
+    # so they remain marked as invalid and maintain position.
 
     stitched = baseline_shift_percentile(blended, p=5.0)
 
