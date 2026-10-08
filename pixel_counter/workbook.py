@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .afc_review import launch_afc_review_session
 from .analysis import (
     build_afc_segment_review_items,
     count_main_beats_from_excel,
