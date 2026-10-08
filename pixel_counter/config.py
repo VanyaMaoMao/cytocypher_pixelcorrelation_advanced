@@ -18,8 +18,6 @@ class BeatCounterConfig:
     orient_n_events: int = 12
     orient_smooth_ms: float = 7.0
     orient_conf_min: float = 0.65
-    orientation_sanity_rescue_ratio_penalty: float = 1.00
-    orientation_sanity_promoted_fail_penalty: float = 0.35
 
     drift_window_s: float = 6.0
     drift_quantile: float = 0.20
@@ -79,29 +77,7 @@ class BeatCounterConfig:
     main_same_transient_weak_rel_prom_max: float = 0.62
     main_same_transient_weak_rel_amp_max: float = 0.65
     main_same_transient_weak_max_width_s: float = 0.06
-    main_local_weak_filter_enabled: bool = True
-    main_local_weak_rel_prom_max: float = 0.28
-    main_local_weak_rel_amp_max: float = 0.55
-    main_local_weak_rel_width_max: float = 0.70
-    main_local_weak_min_gap_rel_ibi: float = 0.58
-    main_local_tiny_filter_enabled: bool = True
-    main_local_tiny_rel_prom_max: float = 0.60
-    main_local_tiny_rel_amp_max: float = 0.62
-    main_local_tiny_rel_width_max: float = 0.55
-    main_short_gap_filter_enabled: bool = True
-    main_short_gap_rel_ibi: float = 0.58
-    main_short_gap_floor_s: float = 0.32
-    main_short_gap_weak_prom_ratio: float = 0.48
-    main_short_gap_weak_width_ratio: float = 0.68
-    main_short_gap_weak_amp_ratio: float = 0.90
     max_main_per_transient_ratio: float = 5.1
-    main_interbeat_tiny_filter_enabled: bool = True
-    main_interbeat_tiny_min_gap_s: float = 0.30
-    main_interbeat_tiny_rel_amp_max: float = 0.42
-    main_interbeat_tiny_rel_prom_max: float = 0.46
-    main_interbeat_tiny_max_width_s: float = 0.14
-    main_interbeat_tiny_global_amp_rel_max: float = 0.55
-    main_interbeat_tiny_global_prom_rel_max: float = 0.60
 
     qc_min_rows: int = 3
     # Consolidated mixed-orientation QC rule.

@@ -33,3 +33,9 @@
 - Updated output report naming in CLI from `_arrhythmia_*` to `_contraction_*`.
 - Updated `README.md` to reflect the removal of AFC and the new output file names.
 - Updated `test_run_pixel_analysis.py` to assert correct exit codes and tests without the legacy mock `analyze_workbook_with_afc_review`.
+
+## 07. Remove dead rules without changing method
+- Verified call graph and public API. Identified `prune_short_gap_weak_mains`, `prune_local_weak_mains`, `prune_interbeat_tiny_bumps`, and `_candidate_orientation_sanity_score` as uncalled functions in `pixel_counter/analysis.py`.
+- Removed these dead functions from `pixel_counter/analysis.py`.
+- Removed their associated configuration fields from `BeatCounterConfig` in `pixel_counter/config.py`, specifically `orientation_sanity_rescue_ratio_penalty`, `orientation_sanity_promoted_fail_penalty`, and all fields starting with `main_local_weak_`, `main_local_tiny_`, `main_short_gap_`, and `main_interbeat_tiny_`.
+- Ran regression tests to verify that these removals don't alter current functionality. All tests pass successfully.
