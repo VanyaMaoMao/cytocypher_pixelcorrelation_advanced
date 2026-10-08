@@ -13,19 +13,72 @@ import pandas as pd
 from .results import AFCEvent, AFCSegmentReviewDecision, AFCReviewSession
 
 def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optional[str] = None) -> Tuple[pd.DataFrame, List[str], float, float]:
-    df = pd.read_excel(file_path, sheet_name=sheet_name)
-    y_cols = [c for c in df.columns if str(c).startswith("y ")]
-    if not y_cols:
-        raise ValueError(f"No 'y ' columns in {sheet_name!r}")
+    if isinstance(file_path, pd.ExcelFile):
+        df = file_path.parse(sheet_name=sheet_name)
+    else:
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+        
+    if isinstance(df, dict):
+        # pd.read_excel returns a dict if sheet_name is None and there are multiple sheets.
+        # But this function expects a single dataframe. Usually it is called per-sheet.
+        if sheet_name is None:
+            # Fallback to the first sheet if none specified and a dict is returned
+            first_sheet = list(df.keys())[0]
+            df = df[first_sheet]
+            sheet_name = first_sheet
 
+    # 1. Parse and validate y columns
+    y_col_names = [c for c in df.columns if str(c).startswith("y ")]
+    if not y_col_names:
+        raise ValueError(f"No 'y ' columns in {sheet_name!r}")
+    
+    parsed_y_cols = []
+    seen_offsets = set()
+    for c in y_col_names:
+        offset_str = str(c)[2:].strip()
+        try:
+            offset_val = float(offset_str)
+        except ValueError:
+            raise ValueError(f"Non-numeric y-offset found: {c!r}")
+        if offset_val in seen_offsets:
+            raise ValueError(f"Duplicate y-offset found for value {offset_val}")
+        seen_offsets.add(offset_val)
+        parsed_y_cols.append((offset_val, c))
+    
+    parsed_y_cols.sort(key=lambda x: x[0])
+    y_cols = [c for _, c in parsed_y_cols]
+
+    # 2. Parse and validate Sampling Frequency
     if "Sampling Frequency" in df.columns:
         s = pd.to_numeric(df["Sampling Frequency"], errors="coerce").dropna()
-        fs = float(s.iloc[0]) if not s.empty else 250.0
+        if not s.empty:
+            unique_fs = s.unique()
+            if len(unique_fs) > 1:
+                raise ValueError(f"Conflicting Sampling Frequency values found: {unique_fs}")
+            fs = float(unique_fs[0])
+            if not np.isfinite(fs) or fs <= 0.0:
+                raise ValueError(f"Invalid Sampling Frequency: {fs}")
+        else:
+            fs = 250.0  # Documented metadata source fallback
     else:
         fs = 250.0
 
+    # 3. Parse Sample ID
+    sample_id_col = next((c for c in df.columns if str(c).strip().lower() == "sample id"), None)
+    if sample_id_col is not None:
+        sample_ids = df[sample_id_col].dropna().astype(str).str.strip()
+        sample_ids = sample_ids[sample_ids != ""]
+        if not sample_ids.empty:
+            unique_sample_ids = sample_ids.unique()
+            if len(unique_sample_ids) > 1:
+                raise ValueError(f"Conflicting Sample IDs found: {unique_sample_ids}")
+
+    # 4. Parse Begin (seconds)
     if "Begin (seconds)" in df.columns:
         s = pd.to_numeric(df["Begin (seconds)"], errors="coerce").dropna()
+        t0 = float(s.iloc[0]) if not s.empty else 0.0
+    elif "Begin" in df.columns:
+        s = pd.to_numeric(df["Begin"], errors="coerce").dropna()
         t0 = float(s.iloc[0]) if not s.empty else 0.0
     else:
         t0 = 0.0
@@ -118,15 +171,16 @@ def extract_sample_id_from_segment_sheet(file_path: str, sheet_name: str) -> Any
     col = next((c for c in df.columns if str(c).strip().lower() == "sample id"), None)
     if col is None:
         return np.nan
-    s = df[col]
-    s = s.dropna()
+    s = df[col].dropna().astype(str).str.strip()
+    s = s[s != ""]
     if s.empty:
         return np.nan
-    s = s[s.astype(str).str.strip() != ""]
-    if s.empty:
-        return np.nan
-    # Prefer stable value if repeated; otherwise use the most frequent non-null.
-    val = s.value_counts(dropna=True).index[0]
+    
+    unique_vals = s.unique()
+    if len(unique_vals) > 1:
+        raise ValueError(f"Conflicting Sample IDs found: {unique_vals}")
+        
+    val = unique_vals[0]
     try:
         vf = float(val)
         if np.isfinite(vf) and abs(vf - round(vf)) < 1e-9:

@@ -39,3 +39,11 @@
 - Removed these dead functions from `pixel_counter/analysis.py`.
 - Removed their associated configuration fields from `BeatCounterConfig` in `pixel_counter/config.py`, specifically `orientation_sanity_rescue_ratio_penalty`, `orientation_sanity_promoted_fail_penalty`, and all fields starting with `main_local_weak_`, `main_local_tiny_`, `main_short_gap_`, and `main_interbeat_tiny_`.
 - Ran regression tests to verify that these removals don't alter current functionality. All tests pass successfully.
+
+## 08. Input Excel contract and sampling frequency
+- Documented input schema in `docs/input_schema.md` covering Begin, End, Sample ID, Sampling Frequency, y-offsets, overlaps, and conflicts.
+- Refactored `load_cytocypher_excel` in `pixel_counter/io_utils.py` to correctly parse and sort numeric `y ` column offsets.
+- Added validation to raise errors on duplicate, non-numeric `y ` offsets or missing `y ` columns.
+- Added explicit parsing and validation of `Sampling Frequency` array to throw errors on missing/NaN, zero, negative, or multiple conflicting frequency values.
+- Updated `extract_sample_id_from_segment_sheet` and `load_cytocypher_excel` to explicitly error on multiple conflicting Sample IDs on a single sheet, removing the previous silent fallback (majority vote).
+- Authored tests in `test_io_excel.py`, `test_io_excel_validation.py`, and `test_extract_sample_id.py`.
