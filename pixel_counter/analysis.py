@@ -2332,16 +2332,24 @@ def _analyze_prebuilt_signal(
         timing[name] = float(timing.get(name, 0.0) + (perf_counter() - float(t_start)))
 
     def _ret(
-        bpm_out: float,
-        n_main_out: int,
         events_out: pd.DataFrame,
     ) -> Tuple[float, int, pd.DataFrame, Dict]:
         if timing is not None:
             meta["timing"] = {str(k): float(v) for k, v in timing.items()}
+
+        bpm_out = meta.get("bpm_file_duration", np.nan)
+        if not bool(meta.get("qc_pass", False)):
+            bpm_out = np.nan
+            meta["bpm_file_duration"] = np.nan
+            meta["count_rate_hz"] = np.nan
+            meta["median_ibi_rate_hz"] = np.nan
+            meta["ibi_cv"] = np.nan
+
+        n_main_out = meta.get("n_main", 0)
         return float(bpm_out), int(n_main_out), events_out, meta
     if sig.size == 0:
         meta.update({"qc_pass": False, "qc_reason": "empty_signal", "hard_noise": True, "hard_reject_reason": "empty_signal", "n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "strong_thr": np.nan, "weak_thr": np.nan, "snr": np.nan})
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     sig_raw = np.asarray(sig, dtype=float)
     sig_work = sig_raw.copy()
@@ -2405,7 +2413,7 @@ def _analyze_prebuilt_signal(
 
     if not qc_pass:
         meta.update({"n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "strong_thr": np.nan, "weak_thr": np.nan, "_sig_plot": sig, "_time_plot": time, "_rescue_peaks_plot": []})
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     trans_id = build_transient_id_vector(sig.size, seg_meta)
 
@@ -2414,7 +2422,7 @@ def _analyze_prebuilt_signal(
     _acc_t("raw_peak_detection_s", t_raw)
     if raw_peaks.size == 0:
         meta.update({"qc_pass": False, "qc_reason": "no_detectable_peaks", "hard_noise": True, "hard_reject_reason": "no_detectable_peaks", "n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "strong_thr": np.nan, "weak_thr": np.nan, "_sig_plot": sig, "_time_plot": time, "_rescue_peaks_plot": []})
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     seg_name_for_debug = str(sheet_name or display_name)
     seg_idx_for_debug = _infer_segment_index_from_name(sheet_name or display_name)
@@ -2478,7 +2486,7 @@ def _analyze_prebuilt_signal(
         if raw_peaks.size == 0:
             _store_peak_debug_rows()
             meta.update({"qc_pass": False, "qc_reason": "all_peaks_filtered_as_spikes", "hard_noise": True, "hard_reject_reason": "all_peaks_filtered_as_spikes", "n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "strong_thr": np.nan, "weak_thr": np.nan, "_sig_plot": sig, "_time_plot": time, "_rescue_peaks_plot": []})
-            return _ret(0.0, 0, empty)
+            return _ret(empty)
 
     discont_meta = detect_discontinuity_artifact_centers(sig=sig, config=config)
     discont_centers = np.asarray(discont_meta.get("centers", np.array([], dtype=int)), dtype=int)
@@ -2526,7 +2534,7 @@ def _analyze_prebuilt_signal(
     if raw_peaks.size == 0:
         _store_peak_debug_rows()
         meta.update({"qc_pass": False, "qc_reason": "all_peaks_filtered_as_artifacts", "hard_noise": True, "hard_reject_reason": "all_peaks_filtered_as_artifacts", "n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "strong_thr": np.nan, "weak_thr": np.nan, "_sig_plot": sig, "_time_plot": time, "_rescue_peaks_plot": []})
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     strong_thr, weak_thr, thr_meta = compute_prominence_thresholds(proms, config)
     weak_thr = max(float(weak_thr), float(config.min_secondary_prom), 3.5 * float(noise_mad))
@@ -2556,7 +2564,7 @@ def _analyze_prebuilt_signal(
     if np.sum(strong_mask) == 0:
         _store_peak_debug_rows()
         meta.update({"qc_pass": False, "qc_reason": "no_main_candidates", "hard_noise": True, "hard_reject_reason": "no_main_candidates", "n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "_sig_plot": sig, "_time_plot": time, "_rescue_peaks_plot": []})
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     main_candidate_set = set(int(x) for x in raw_peaks[strong_mask].tolist())
     main_peaks = raw_peaks[strong_mask]
@@ -2689,7 +2697,7 @@ def _analyze_prebuilt_signal(
         final_main_set = set(int(x) for x in main_peaks.tolist())
         _store_peak_debug_rows()
         meta.update({"qc_pass": False, "qc_reason": "too_many_main_candidates_noise", "hard_noise": True, "hard_reject_reason": "too_many_main_candidates_noise", "n_main": 0, "n_main_primary": 0, "n_main_rescue": 0, "quality_score": -np.inf, "prom_snr": 0.0, "ibi_cv": np.nan, "_sig_plot": sig, "_time_plot": time, "_rescue_peaks_plot": []})
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     t_rescue = perf_counter()
     rescue_peaks, rescue_meta = rescue_boundary_split_main_peaks(
@@ -2813,7 +2821,7 @@ def _analyze_prebuilt_signal(
             "_rescue_peaks_plot": [],
             "_rescue_times_s": [],
         })
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     if (
         total_main <= 4
@@ -2837,7 +2845,7 @@ def _analyze_prebuilt_signal(
             "_rescue_peaks_plot": [],
             "_rescue_times_s": [],
         })
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     if (
         total_main >= 8
@@ -2863,7 +2871,7 @@ def _analyze_prebuilt_signal(
             "_rescue_peaks_plot": [],
             "_rescue_times_s": [],
         })
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     if (
         total_main >= 10
@@ -2889,7 +2897,7 @@ def _analyze_prebuilt_signal(
             "_rescue_peaks_plot": [],
             "_rescue_times_s": [],
         })
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     # Use rescue-only events for irregular-noise gating to avoid inflating rescue ratio
     # when a boundary marker overlaps an already-accepted main peak.
@@ -2923,7 +2931,7 @@ def _analyze_prebuilt_signal(
             "_rescue_peaks_plot": [],
             "_rescue_times_s": [],
         })
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     if (
         total_main >= 10
@@ -2951,7 +2959,7 @@ def _analyze_prebuilt_signal(
             "_rescue_peaks_plot": [],
             "_rescue_times_s": [],
         })
-        return _ret(0.0, 0, empty)
+        return _ret(empty)
 
     meta.update({
         "n_main": int(total_main),
@@ -2969,7 +2977,7 @@ def _analyze_prebuilt_signal(
         "_time_plot": time,
         "main_only_pipeline": True,
     })
-    return _ret(bpm, total_main, events)
+    return _ret(events)
 
 def rescue_candidate_is_plausible(meta: Dict) -> bool:
     if not bool(meta.get("qc_pass", False)):
