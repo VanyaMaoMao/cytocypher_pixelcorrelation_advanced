@@ -173,7 +173,7 @@ def detect_events_v2(
         proms_arr = proms_arr[order]
         widths_arr = widths_arr[order]
 
-    return {
+    cands = {
         "candidate_index": peaks_arr,
         "time_s": peaks_arr / fs, # Assume t0=0 internally here, adjusted by caller if needed
         "amplitude": sig[peaks_arr] if peaks_arr.size > 0 else np.array([], dtype=float),
@@ -181,6 +181,9 @@ def detect_events_v2(
         "width_s": widths_arr,
         "polarity": np.full(peaks_arr.size, polarity, dtype=int),
     }
+
+    # Step 15: Apply final deduplication procedure
+    return deduplicate_events_v2(sig, fs, cands, config)
 
 def detect_raw_peaks(sig: np.ndarray, fs: float, config: BeatCounterConfig) -> Tuple[np.ndarray, Dict]:
     min_dist = max(1, int(config.min_peak_distance_s * fs))
@@ -3301,3 +3304,126 @@ def count_main_beats_from_excel(
     return bpm, n_main, events, meta
 
 
+
+def deduplicate_events_v2(
+    sig: np.ndarray,
+    fs: float,
+    candidates: Dict[str, np.ndarray],
+    config: BeatCounterConfig
+) -> Dict[str, np.ndarray]:
+    """
+    Step 15: One final deduplication procedure for v2.
+    Distinguishes genuine neighboring contractions from duplicates using temporal separation,
+    valley depth, and morphology.
+    Returns the same candidate dictionary format with added fields:
+    'status' (PASS, REVIEW, or REJECT), 'competing_id' (int), and 'decision_reason' (str).
+    """
+    idxs = candidates.get("candidate_index", np.array([], dtype=int))
+    if idxs.size == 0:
+        candidates_out = dict(candidates)
+        candidates_out["status"] = np.array([], dtype=object)
+        candidates_out["competing_id"] = np.array([], dtype=int)
+        candidates_out["decision_reason"] = np.array([], dtype=object)
+        candidates_out["dedup_audit"] = []
+        return candidates_out
+
+    n = idxs.size
+    times = candidates.get("time_s", np.zeros(n, dtype=float))
+    amps = candidates.get("amplitude", np.zeros(n, dtype=float))
+    proms = candidates.get("prominence", np.zeros(n, dtype=float))
+    widths = candidates.get("width_s", np.zeros(n, dtype=float))
+    polarities = candidates.get("polarity", np.ones(n, dtype=int))
+
+    max_biological_rate_hz = 15.0
+    min_biological_period_s = 1.0 / max_biological_rate_hz
+    min_valley_ratio_required = 0.15
+    max_width_s = 0.15
+
+    # Determine if two specific peaks should merge
+    def should_merge(i: int, j: int) -> Tuple[bool, str]:
+        idx_L, idx_R = min(int(idxs[i]), int(idxs[j])), max(int(idxs[i]), int(idxs[j]))
+        dt_s = (idx_R - idx_L) / max(fs, 1e-9)
+
+        if idx_R < len(sig):
+            amp_L = float(sig[idx_L]) if 0 <= idx_L < len(sig) else 0.0
+            amp_R = float(sig[idx_R]) if 0 <= idx_R < len(sig) else 0.0
+
+            # Use polarity for valley logic. The valley is the value closest to baseline (0.0).
+            pol = polarities[i]
+            if pol < 0:
+                # Inverted signal: peaks are negative. Valley is the maximum value (least negative).
+                valley = float(np.max(sig[idx_L : idx_R + 1]))
+                # Amplitudes are negative, so min_amp refers to the weaker peak (closest to zero, i.e., max value)
+                min_amp = max(amp_L, amp_R)
+                # Ratio of distance from valley to baseline compared to peak to baseline.
+                valley_ratio = abs(min_amp - valley) / max(abs(min_amp), 1e-12)
+            else:
+                valley = float(np.min(sig[idx_L : idx_R + 1]))
+                min_amp = min(amp_L, amp_R)
+                valley_ratio = abs(min_amp - valley) / max(abs(min_amp), 1e-12)
+        else:
+            valley_ratio = 1.0
+
+        if dt_s < min_biological_period_s:
+            return True, f"temporal_separation_dt_{dt_s:.3f}s_below_limit_{min_biological_period_s:.3f}s"
+        elif dt_s < max_width_s and valley_ratio < min_valley_ratio_required:
+            return True, f"shallow_valley_ratio_{valley_ratio:.2f}_below_limit_{min_valley_ratio_required:.2f}"
+
+        return False, ""
+
+    def score(idx: int) -> float:
+        amp_i = float(sig[int(idxs[idx])]) if 0 <= int(idxs[idx]) < len(sig) else 0.0
+        return float(proms[idx] * np.sqrt(max(widths[idx], 1e-9)) * np.sqrt(max(abs(amp_i), 1e-9)))
+
+    # Use a greedy approach to avoid transitive A-B-C merging.
+    # Sort candidates by score.
+    sorted_indices = sorted(range(n), key=lambda i: (score(i), abs(float(sig[int(idxs[i])])) if 0 <= int(idxs[i]) < len(sig) else 0.0, -int(idxs[i])), reverse=True)
+
+    statuses = np.full(n, "PASS", dtype=object)
+    competing_ids = np.full(n, -1, dtype=int)
+    reasons = np.full(n, "", dtype=object)
+
+    for i in sorted_indices:
+        if statuses[i] != "PASS":
+            continue
+
+        winner_pk = int(idxs[i])
+        winner_amp = float(sig[winner_pk]) if 0 <= winner_pk < len(sig) else 0.0
+
+        # Check all other peaks to see if they merge with this strong peak
+        for j in range(n):
+            if i != j and statuses[j] == "PASS":
+                merge, reason = should_merge(i, j)
+                if merge:
+                    statuses[j] = "REJECT"
+                    competing_ids[j] = winner_pk
+                    reasons[j] = reason
+
+                    # Check for REVIEW condition
+                    m_pk = int(idxs[j])
+                    m_amp = float(sig[m_pk]) if 0 <= m_pk < len(sig) else 0.0
+                    dt_samples = abs(m_pk - winner_pk)
+
+                    if dt_samples <= max(2, int(0.01 * fs)) and abs(abs(m_amp) - abs(winner_amp)) < 0.05 * max(abs(winner_amp), 1e-12):
+                        statuses[i] = "REVIEW"
+
+    # Filter arrays and construct output
+    keep_mask = (statuses == "PASS") | (statuses == "REVIEW")
+    out = {}
+    for k, v in candidates.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v[keep_mask]
+
+    out["status"] = statuses[keep_mask]
+
+    # Store audit list
+    audit = []
+    for i in range(n):
+        if statuses[i] == "REJECT":
+            audit.append({
+                "suppressed_id": int(idxs[i]),
+                "competing_id": int(competing_ids[i]),
+                "reason": str(reasons[i])
+            })
+    out["dedup_audit"] = audit
+    return out
