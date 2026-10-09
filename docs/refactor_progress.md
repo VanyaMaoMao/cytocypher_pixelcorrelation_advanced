@@ -120,3 +120,13 @@
 - Applies a block-local detrend filter utilizing `scipy.signal.medfilt` ensuring block independence.
 - Supports explicit inversion polarity and yields exact candidate samples mapped perfectly without boundary interference from row partitioning.
 - Added comprehensive tests inside `test_detect_events_v2.py` targeting missing data integrity, polarity accuracy, row-boundary edge cases, synthetic signal integrity, and isolated block failure avoidance.
+
+## 15. Unified Candidate Deduplication
+- Implemented `deduplicate_events_v2` logic for the v2 detector operating exclusively on experimental candidates inside `pixel_counter/analysis.py`.
+- Devised deterministic deduplication rules using physical characteristics including temporal separation (minimum period > 50ms) and morphological isolation (valley depth ratio >= 0.15) while successfully dropping reliance on universal 0.28-second fixed windows.
+- Ensured logic appropriately groups A-B-C chains of peaks sequentially by highest score, strictly avoiding transitive merging that erroneously deletes intermediate genuine contractions.
+- Correctly incorporated candidate polarities during algorithmic evaluations of baseline depth, resolving an edge case where inverted waveforms incorrectly scored flat valleys.
+- Validated suppressed events retain their source ID alongside explicit reference to their respective competing IDs and clear rejection reasons.
+- Integrated a `REVIEW` marker that triggers natively instead of assigning arbitrary status whenever closely neighboring candidates possess indistinguishable parameters beneath sampling resolutions.
+- Reverted all attempted modifications to the legacy `deduplicate_main_candidates` framework, fully complying with instructions protecting existing step logic inside `_analyze_prebuilt_signal`, `build_events_dataframe`, and metrics schemas.
+- Ran robust integration test schemas encompassing shoulder peaks, deep valley exclusions, sub-sampling arrays, missing artifacts and 10+ Hz fast-beat rhythms validating accuracy thresholds and suppression decisions safely against synthetics in `test_detect_events_v2.py`.
