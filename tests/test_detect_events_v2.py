@@ -100,3 +100,32 @@ def test_detect_events_v2_short_block():
     # Should not crash, should return empty
     res = detect_events_v2(signal, fs, config)
     assert res["candidate_index"].size == 0
+
+@pytest.mark.parametrize("samples_per_row", [125, 250, 500])
+def test_detect_events_v2_row_partition_invariance(samples_per_row):
+    """
+    Directly verify that evaluating data derived from different Excel row partitions
+    yields identically invariant peak detection in the v2 pipeline.
+    """
+    fs = 250.0
+    t = np.arange(2500) / fs
+    centers = 0.125 + 0.25 * np.arange(40)
+
+    # Generate the base signal
+    base_signal = np.zeros_like(t)
+    for c in centers:
+        base_signal += 0.2 * np.exp(-0.5 * ((t - c) / 0.020) ** 2)
+
+    # Simulate extraction of the signal from varying row partitions
+    stitched_signal = np.full(2500, np.nan)
+    for i in range(0, 2500, samples_per_row):
+        end = min(i + samples_per_row, 2500)
+        stitched_signal[i:end] = base_signal[i:end]
+
+    config = BeatCounterConfig(prom0=0.01)
+
+    # Evaluate via v2
+    res = detect_events_v2(stitched_signal, fs, config)
+
+    assert res["candidate_index"].size == 40, f"Expected exactly 40 peaks for partition size {samples_per_row}, got {res['candidate_index'].size}"
+    np.testing.assert_allclose(res["time_s"], centers, atol=0.008)
