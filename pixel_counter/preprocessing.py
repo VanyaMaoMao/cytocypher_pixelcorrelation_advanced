@@ -572,7 +572,7 @@ def build_concatenated_signal(
     return stitched, seg_meta, meta
 
 def build_transient_id_vector(sig_len: int, seg_meta: List[Tuple[int, int, int, float, int]]) -> np.ndarray:
-    out = np.empty(sig_len, dtype=int)
+    out = np.full(sig_len, -1, dtype=int)
     for tid, s, e, _, _ in seg_meta:
         out[s:e] = int(tid)
     return out

@@ -53,3 +53,8 @@
 - Removed the gap interpolation logic so that gaps remain as NaNs, maintaining invalid representation instead of fabricating data points.
 - Refactored orientation-finding features like `_row_dominant_direction`, `choose_orientation_make_peaks_positive`, and `_row_corr_median` to properly handle NumPy arrays that have `NaN` elements by switching to nan-safe routines or properly masking inputs prior to calculation.
 - Added tests asserting that missing values in the form of NaNs do not discard the element position.
+
+## 10. Coverage, gaps, and absolute timeline
+- Verified `build_concatenated_signal` evaluates the valid overlap/gaps dynamically using `np.isnan` tracking correctly mapped against `Begin/End` coordinates. Gaps appropriately remain `NaN`.
+- Refactored `build_transient_id_vector` to assign a deterministic sentinel `-1` instead of allocating an uninitialized `np.empty` structure. This ensures sections without measurements appropriately fall back rather than emitting invalid memory traces or arbitrarily combining with unassociated overlaps.
+- Extended regression tests specifically checking overlap blending intervals and testing that sentinel IDs properly apply in missing data fields across boundaries without error.
