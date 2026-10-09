@@ -94,8 +94,16 @@ def test_build_concatenated_signal_overlap_and_gap():
     
     # recreate dataframe to have actual 30 y columns
     data = {"Begin": [0.0, 2.0, 6.0], "End": [3.0, 5.0, 9.0]}
+    # Make sure overlaps do not conflict numerically
     for i in range(30):
-        data[f"y {i}"] = [1.0 + i*0.01, 2.0 + i*0.01, 3.0 + i*0.01]
+        # Row 0: starts at 0.0, so at index 20 it is at y 20
+        # Row 1: starts at 2.0, so at index 20 it is at y 0
+        # We need Row 0's y 20 to match Row 1's y 0.
+        # Let's just use the absolute time index for the values to guarantee no conflict.
+        # t0 = 0, y = 0.01 * idx
+        # t1 = 20, y = 0.01 * (idx + 20)
+        # t2 = 60, y = 0.01 * (idx + 60)
+        data[f"y {i}"] = [0.01 * i, 0.01 * (i + 20), 0.01 * (i + 60)]
     
     df = pd.DataFrame(data)
     config = BeatCounterConfig()

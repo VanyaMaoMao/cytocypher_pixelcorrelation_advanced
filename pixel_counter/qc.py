@@ -21,7 +21,14 @@ def detect_vertical_line_artifacts(sig: np.ndarray, config: BeatCounterConfig) -
     s = np.asarray(sig, dtype=float)
     if s.size < 5:
         return {"centers": np.array([], dtype=int), "n_artifacts": 0, "jump_thr": 0.0}
-    abs_d1 = np.abs(np.diff(s))
+
+    # Compute diff safely across non-nan boundaries to avoid fake massive gaps
+    d1 = np.full(len(s) - 1, np.nan, dtype=float)
+    valid = np.isfinite(s)
+    both_valid = valid[:-1] & valid[1:]
+    d1[both_valid] = np.abs(s[1:][both_valid] - s[:-1][both_valid])
+
+    abs_d1 = d1[both_valid]
     if abs_d1.size < 3:
         return {"centers": np.array([], dtype=int), "n_artifacts": 0, "jump_thr": 0.0}
     q99 = float(np.quantile(abs_d1, 0.99))
@@ -32,6 +39,8 @@ def detect_vertical_line_artifacts(sig: np.ndarray, config: BeatCounterConfig) -
 
     c = []
     for i in range(1, s.size - 1):
+        if not (valid[i-1] and valid[i] and valid[i+1]):
+            continue
         left = float(s[i] - s[i - 1])
         right = float(s[i + 1] - s[i])
         if left * right >= 0:
