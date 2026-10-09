@@ -58,10 +58,11 @@ def test_timing_overlap_conflicting():
         }
     ])
     y_cols = ["y 0", "y 1", "y 2"]
-    sig_c, _, _ = build_concatenated_signal(df, y_cols, fs, config)
-    # With a conflict, either 1.2 or 5.0 or a NaN marker is expected if handled deterministically,
-    # but not an arbitrary offset mask.
-    assert np.isclose(sig_c[2], 1.2) or np.isclose(sig_c[2], 5.0), f"Expected strict value or conflict resolution, got {sig_c[2]}"
+    sig_c, _, meta = build_concatenated_signal(df, y_cols, fs, config)
+    # A conflict between 1.2 and 5.0 should result in NaN
+    assert np.isnan(sig_c[2]), f"Expected NaN for conflict, got {sig_c[2]}"
+    assert meta.get("stitch_overlap_conflicts") == 1
+    assert 2 in meta.get("stitch_overlap_conflict_indices", [])
 
 
 def test_timing_overlap_nested():

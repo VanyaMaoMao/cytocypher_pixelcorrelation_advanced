@@ -96,3 +96,10 @@
 - Rewrote `build_concatenated_signal` strictly mapping row coordinates without applying silent median overlap corrections, fulfilling requirements not to silently alter signal amplitudes to reconcile overlaps.
 - Corrected gap processing making missing values preserve time positions without generating hundreds of false vertical artifacts by utilizing NaN-safe numpy operations (`np.isfinite` filters on signal diffs and median shift routines).
 - Validated these changes resolved the failures mapped to them. Tests for `test_audit_regression_missing_data.py` (nan robustness) and `test_audit_regression_timing_overlap.py` passed exactly as expected. Test suite was verified.
+
+### Audit Remediation (Task 02b: Critical Data-Integrity Overlap Conflicts)
+**Status**: COMPLETE
+**Details**:
+- Rewrote conflict resolution inside `build_concatenated_signal`. True overlapping matches are placed accurately without double-counting.
+- Genuinely conflicting samples are now marked as `np.nan` and logged as metadata variables (`stitch_overlap_conflicts`, `stitch_overlap_conflict_indices`) rather than silently overwritten or averaged.
+- Passed test suite against updated rules, including specific validation of conflict NaN handling inside `test_audit_regression_timing_overlap.py`.

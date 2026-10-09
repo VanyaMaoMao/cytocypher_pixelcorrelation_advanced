@@ -514,6 +514,7 @@ def build_concatenated_signal(
 
     stitched = np.full(n_global, np.nan, dtype=float)
     overlap_samples = []
+    conflict_indices_global = []
 
     # Sort by time to place correctly
     row_entries.sort(key=lambda x: (int(x["start_idx"]), int(x["tid"])))
@@ -534,9 +535,21 @@ def build_concatenated_signal(
 
         if np.any(conflict):
             overlap_samples.append(np.sum(conflict))
-            # No median shift. Just take the existing value or overwrite.
-            # We'll just overwrite.
-            stitched[s:e][conflict] = tr[conflict]
+
+            existing_vals = stitched[s:e][conflict]
+            new_vals = tr[conflict]
+
+            # Check for mismatches between overlapping samples
+            mismatch = ~np.isclose(existing_vals, new_vals, equal_nan=True)
+
+            if np.any(mismatch):
+                # Calculate global positions of the mismatches
+                conflict_positions_in_slice = np.where(conflict)[0][mismatch]
+                global_positions = s + conflict_positions_in_slice
+                conflict_indices_global.extend(global_positions.tolist())
+
+                # Assign NaN to genuinely conflicting overlapping samples
+                stitched[s + conflict_positions_in_slice] = np.nan
 
             # Place non-conflicting new values
             place_new = valid_mask & ~target_valid
@@ -596,6 +609,8 @@ def build_concatenated_signal(
             "stitch_median_row_offset": 0.0,
             "stitch_max_row_offset": 0.0,
             "time_origin_s": float(time_origin_s),
+            "stitch_overlap_conflicts": int(len(conflict_indices_global)),
+            "stitch_overlap_conflict_indices": conflict_indices_global,
         }
     )
     return stitched, seg_meta, meta
