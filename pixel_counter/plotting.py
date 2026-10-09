@@ -22,20 +22,21 @@ def plot_events(*, time: np.ndarray, sig: np.ndarray, events: pd.DataFrame, file
     if rescue_idx.size > 0:
         ax.scatter(np.asarray(time, dtype=float)[rescue_idx], np.asarray(sig, dtype=float)[rescue_idx], s=52, c="#2ca02c", label="Rescue", zorder=3)
 
-    if config.show_threshold_guides and np.isfinite(strong_thr) and np.isfinite(weak_thr):
-        ax.axhline(strong_thr, ls="--", alpha=0.25, color="#1f77b4")
-        ax.axhline(weak_thr, ls=":", alpha=0.25, color="#2ca02c")
-
     qc_flag, qc_reason, invert, conf = "PASS", "pass", None, np.nan
+    duration_s = np.nan
     if meta:
         qc_flag = "PASS" if bool(meta.get("qc_pass", True)) else "REJECT"
         qc_reason = str(meta.get("qc_reason", "pass"))
         orient = meta.get("orientation", {})
         invert = orient.get("invert", None)
         conf = float(orient.get("confidence", np.nan))
+        duration_s = float(meta.get("duration_s", np.nan))
 
-    ax.set_title(f"{file_name}\nQC={qc_flag} ({qc_reason}) | main={n_main} rescue={n_rescue} bpm={bpm:.2f} | invert={invert} conf={conf:.2f}")
-    ax.set_xlabel("Concatenated Time (s)")
+    title = f"{file_name}\nQC={qc_flag} ({qc_reason}) | main={n_main} rescue={n_rescue} bpm={bpm:.2f} | invert={invert} conf={conf:.2f}"
+    if np.isfinite(duration_s):
+        title += f" | duration={duration_s:.2f}s"
+    ax.set_title(title)
+    ax.set_xlabel("Absolute Time (s)")
     ax.set_ylabel("Amplitude (oriented, baseline-shifted)")
     ax.grid(True, alpha=0.15)
     ax.legend(loc="upper right")

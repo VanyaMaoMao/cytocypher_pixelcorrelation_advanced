@@ -67,6 +67,17 @@
 - Ensured sample ID properly cascades directly from analysis stages directly into the compiled dataframes.
 - Validated modifications using newly added integration tests inside `tests/test_canonical_events.py`.
 
+## 13. Consistent plots and reports
+- Updated `plot_events` in `pixel_counter/plotting.py` to remove misleading absolute amplitude horizontal lines for prominence thresholds.
+- Changed the time-axis label in `plot_events` to "Absolute Time (s)" instead of "Concatenated Time (s)".
+- Appended the analyzed duration `duration_s` explicitly from `meta` into the plot title.
+- Verified that missing-data gaps correctly do not have crossing interpolation lines.
+- Updated `_make_summary_dataframe` in `pixel_counter/results.py` to load the exact `bpm_file_duration` directly rather than applying a manual ratio over `recording_s`.
+- Modified `_make_summary_dataframe` so invalid metrics fall back correctly to `NaN` (rendering N/A rather than 0) for `Diagnostic BPM` on `ERROR` paths.
+- Renamed the hardcoded reporting output column `BPM (using user duration)` to `BPM` in `_build_clean_summary_sheet`.
+- Changed DOCX metrics outputs to explicitly render `Accepted BPM` (falling back to N/A if missing) and replaced manual user recording length with the accurate `Analyzed duration (s)`.
+- Reconciled related unit tests ensuring exact consistency between reports and numeric values.
+
 ### Audit Remediation (Task 01: Regression Tests)
 **Status**: COMPLETE
 **Details**:

@@ -242,7 +242,6 @@ def build_raw_cytocypher_docx_report(
         doc.add_paragraph(f"Stim frequency (Hz): {stim_hz:.4g}")
     else:
         doc.add_paragraph("Stim frequency (Hz): 0.0 (spontaneous)")
-    doc.add_paragraph(f"Recording duration (s): {recording_s:.4g}")
     doc.add_paragraph("Processed sheet types: PixelCorrelation Segment")
 
     afc_df_all = pd.DataFrame([x.to_dict() for x in afc_events]) if afc_events else pd.DataFrame()
@@ -266,7 +265,9 @@ def build_raw_cytocypher_docx_report(
         n_total = int(item["n_main"])
         n_primary = int(item.get("n_main_primary", n_total))
         n_rescue = int(item.get("n_rescue", 0))
-        bpm_user = float((n_total / recording_s) * 60.0) if recording_s > 0 else 0.0
+
+        bpm = float(meta.get("bpm_file_duration", np.nan))
+        duration_s = float(meta.get("duration_s", np.nan))
 
         heading = f"{sheet_name} (Sample ID {sample_id})" if sample_id else sheet_name
         doc.add_heading(heading, level=1)
@@ -276,8 +277,11 @@ def build_raw_cytocypher_docx_report(
         if isinstance(png_bytes, (bytes, bytearray)) and len(png_bytes) > 0:
             doc.add_picture(io.BytesIO(png_bytes), width=Inches(6.8))
 
+        bpm_str = f"{bpm:.2f}" if np.isfinite(bpm) else "N/A"
+        duration_str = f"{duration_s:.4g}" if np.isfinite(duration_s) else "N/A"
         metric_lines = [
-            f"BPM (using user duration): {bpm_user:.2f}",
+            f"Accepted BPM: {bpm_str}",
+            f"Analyzed duration (s): {duration_str}",
             f"Primary main beats: {n_primary}",
             f"Rescue peaks: {n_rescue}",
             f"Total detected events: {n_total}",
@@ -504,7 +508,7 @@ def _build_clean_summary_sheet(
         "Sample ID",
         "QC",
         "QC reason",
-        "BPM (using user duration)",
+        "BPM",
         "Primary main beats",
         "Rescue peaks",
         "Total detected events",
@@ -529,9 +533,9 @@ def _build_clean_summary_sheet(
         {
             "Segment": _pick_col("Segment", default=""),
             "Sample ID": np.nan,
-            "QC": _pick_col("QC", default=""),
+            "QC": _pick_col("QC", "Status", default=""),
             "QC reason": _pick_col("QC reason", default=""),
-            "BPM (using user duration)": _pick_col("BPM (using user duration)", default=np.nan),
+            "BPM": _pick_col("Accepted BPM", "BPM", "BPM (using user duration)", default=np.nan),
             "Primary main beats": _pick_col("Primary main beats", "primary_main_beats", default=np.nan),
             "Rescue peaks": _pick_col("Rescue peaks", "rescue_peaks", default=np.nan),
             "Total detected events": _pick_col("Total detected events", "total_detected_events", "Main beats", default=np.nan),
@@ -570,7 +574,7 @@ def _build_clean_summary_sheet(
 
     reject_mask = out["QC"].astype(str).str.upper().eq("REJECT")
     for c in [
-        "BPM (using user duration)",
+        "BPM",
         "Primary main beats",
         "Rescue peaks",
         "Total detected events",

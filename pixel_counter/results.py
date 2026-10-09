@@ -445,7 +445,8 @@ def _make_summary_dataframe(segment_results: List[Dict], stim_hz: float, recordi
         n_total = int(item["n_main"])
         n_primary = int(item.get("n_main_primary", n_total))
         n_rescue = int(item.get("n_rescue", 0))
-        bpm_user_exact = float((n_total / recording_s) * 60.0) if recording_s > 0 else 0.0
+
+        bpm_file_duration = float(meta.get("bpm_file_duration", np.nan))
         qc_reason = str(meta.get("qc_reason", "unknown"))
         if bool(meta.get("qc_pass", False)):
             status = "PASS"
@@ -454,8 +455,10 @@ def _make_summary_dataframe(segment_results: List[Dict], stim_hz: float, recordi
         else:
             status = "REJECT"
 
-        accepted_bpm = float(bpm_user_exact) if status == "PASS" else np.nan
+        accepted_bpm = float(bpm_file_duration) if status == "PASS" else np.nan
         accepted_events = n_total if status == "PASS" else np.nan
+
+        diagnostic_bpm = float(bpm_file_duration) if status != "ERROR" else np.nan
 
         row = {
             "Segment": item["sheet_name"],
@@ -463,7 +466,7 @@ def _make_summary_dataframe(segment_results: List[Dict], stim_hz: float, recordi
             "QC reason": qc_reason,
             "Accepted BPM": accepted_bpm,
             "Accepted events": accepted_events,
-            "Diagnostic BPM": float(bpm_user_exact),
+            "Diagnostic BPM": diagnostic_bpm,
             "Diagnostic events": n_total,
             "Primary main beats": n_primary,
             "Rescue peaks": n_rescue,
