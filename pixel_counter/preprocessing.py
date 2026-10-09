@@ -15,7 +15,9 @@ def baseline_shift_percentile(sig: np.ndarray, p: float = 5.0) -> np.ndarray:
     finite_mask = np.isfinite(sig)
     if not np.any(finite_mask):
         return np.asarray(sig, dtype=float)
-    return np.asarray(sig, dtype=float) - float(np.percentile(sig[finite_mask], p))
+    shifted = np.asarray(sig, dtype=float)
+    shifted[finite_mask] = shifted[finite_mask] - float(np.percentile(sig[finite_mask], p))
+    return shifted
 
 def _rolling_quantile_trend(sig: np.ndarray, fs: float, window_s: float, quantile: float) -> np.ndarray:
     s = np.asarray(sig, dtype=float)
@@ -36,20 +38,29 @@ def _rolling_quantile_trend(sig: np.ndarray, fs: float, window_s: float, quantil
     pct = 100.0 * q
 
     s_work = s.copy()
-    if not np.isfinite(s_work).all():
-        idx = np.arange(s_work.size, dtype=float)
-        ok = np.isfinite(s_work)
-        n_ok = int(np.sum(ok))
-        if n_ok >= 2:
-            s_work = np.interp(idx, idx[ok], s_work[ok])
-        elif n_ok == 1:
-            s_work = np.full(s_work.size, float(s_work[ok][0]), dtype=float)
-        else:
-            return np.full(s.size, np.nan, dtype=float)
+    ok = np.isfinite(s_work)
+    n_ok = int(np.sum(ok))
+    if n_ok < 2:
+        if n_ok == 1:
+            return np.full(s.size, float(s_work[ok][0]), dtype=float)
+        return np.full(s.size, np.nan, dtype=float)
 
-    trend = percentile_filter(s_work, percentile=pct, size=win, mode="reflect")
-    if not np.isfinite(trend).any():
-        return trend
+    trend = np.full(s.size, np.nan, dtype=float)
+
+    # Process only contiguous valid blocks to avoid blurring across gaps
+    idx = np.where(ok)[0]
+    run_starts = np.where(np.diff(idx) > 1)[0] + 1
+    run_starts = np.insert(run_starts, 0, 0)
+    run_ends = np.append(run_starts[1:] - 1, len(idx) - 1)
+
+    for rs, re in zip(run_starts, run_ends):
+        i_start = idx[rs]
+        i_end = idx[re] + 1
+        block = s_work[i_start:i_end]
+        if len(block) >= 2:
+            trend[i_start:i_end] = percentile_filter(block, percentile=pct, size=min(win, len(block)), mode="reflect")
+        else:
+            trend[i_start:i_end] = block
 
     idx = np.arange(s.size, dtype=float)
     ok = np.isfinite(trend)
@@ -143,7 +154,27 @@ def moving_average_smooth(sig: np.ndarray, fs: float, smooth_ms: float = 15.0) -
         k += 1
     if s.size < k:
         return s.copy()
-    return np.convolve(s, np.ones(k) / k, mode="same")
+
+    smoothed = np.full(s.size, np.nan, dtype=float)
+    valid = np.isfinite(s)
+    if not np.any(valid):
+        return smoothed
+
+    idx = np.where(valid)[0]
+    run_starts = np.where(np.diff(idx) > 1)[0] + 1
+    run_starts = np.insert(run_starts, 0, 0)
+    run_ends = np.append(run_starts[1:] - 1, len(idx) - 1)
+
+    window = np.ones(k) / k
+    for rs, re in zip(run_starts, run_ends):
+        i_start = idx[rs]
+        i_end = idx[re] + 1
+        block = s[i_start:i_end]
+        if len(block) >= k:
+            smoothed[i_start:i_end] = np.convolve(block, window, mode="same")
+        else:
+            smoothed[i_start:i_end] = block
+    return smoothed
 
 def compute_global_snr(sig: np.ndarray) -> Tuple[float, float, float]:
     signal_mad = float(median_abs_deviation(sig, scale="normal"))
@@ -154,6 +185,13 @@ def estimate_dominant_period_autocorr(sig: np.ndarray, fs: float) -> Tuple[float
     s = np.asarray(sig, dtype=float)
     if s.size < int(0.5 * fs):
         return np.nan, 0.0
+    valid = np.isfinite(s)
+    if int(np.sum(valid)) < int(0.5 * fs):
+        return np.nan, 0.0
+    # Interpolate gaps just for autocorrelation estimation to avoid NaNs ruining FFT
+    if not np.all(valid):
+        idx = np.arange(s.size)
+        s = np.interp(idx, idx[valid], s[valid])
     x = s - np.median(s)
     sd = float(np.std(x))
     if sd < 1e-12:
@@ -345,7 +383,10 @@ def build_concatenated_signal(
             continue
         if tr.size == 0:
             continue
-        begin = pd.to_numeric(row.get("Begin", np.nan), errors="coerce")
+        begin = row.get("Begin")
+        if begin is None:
+            begin = row.get("Begin (seconds)", np.nan)
+        begin = pd.to_numeric(begin, errors="coerce")
         end = pd.to_numeric(row.get("End", np.nan), errors="coerce")
         row_entries.append(
             {
@@ -422,15 +463,34 @@ def build_concatenated_signal(
     for entry in row_entries:
         entry["trace"] = (-entry["trace_raw"] if invert_all else entry["trace_raw"]).astype(float)
 
+    # Begin reconstruction according to timestamps strictly
     begin_vals = np.array([entry["begin"] for entry in row_entries], dtype=float)
     use_begin_end = bool(np.isfinite(begin_vals).all())
+
+    # 1. Establish anchor
     if use_begin_end:
-        global_begin = float(np.min(begin_vals))
         for entry in row_entries:
-            start_idx = int(round((float(entry["begin"]) - global_begin) * fs))
+            tr = entry["trace"]
+            valid_idx = np.where(np.isfinite(tr))[0]
+            if len(valid_idx) > 0:
+                first_valid = valid_idx[0]
+            else:
+                first_valid = 0
+
+            # Anchor timestamp corresponds to the first valid value.
+            entry["true_time_origin"] = float(entry["begin"]) - (first_valid / fs)
+
+        for entry in row_entries:
+            start_idx = int(round((entry["true_time_origin"]) * fs))
             entry["start_idx"] = start_idx
-            entry["end_idx"] = int(start_idx + len(entry["trace"]))
+
+        global_start_idx = int(np.min([e["start_idx"] for e in row_entries]))
+        global_begin = float(global_start_idx / fs)
+
+        for entry in row_entries:
+            entry["end_idx"] = int(entry["start_idx"] + len(entry["trace"]))
     else:
+        # Fallback if no Begin
         y_offsets = []
         for c in y_cols:
             m = re.match(r"^y\s+(-?\d+)$", str(c))
@@ -444,82 +504,56 @@ def build_concatenated_signal(
             start_idx += max(1, int(len(entry["trace"]) - overlap))
         global_begin = 0.0
 
-    row_entries.sort(key=lambda x: (int(x["start_idx"]), int(x["tid"])))
-
-    overlap_samples: List[int] = []
-    partition_bounds: List[Tuple[int, int, int]] = []
-    for i, entry in enumerate(row_entries):
-        start_idx = int(entry["start_idx"])
-        end_idx = int(entry["end_idx"])
-        if i == 0:
-            left_global = start_idx
-        else:
-            prev_end = int(row_entries[i - 1]["end_idx"])
-            left_global = int(round((prev_end + start_idx) / 2.0))
-            overlap_samples.append(max(0, prev_end - start_idx))
-
-        if i == len(row_entries) - 1:
-            right_global = end_idx
-        else:
-            next_start = int(row_entries[i + 1]["start_idx"])
-            right_global = int(round((end_idx + next_start) / 2.0))
-
-        left_global = max(left_global, start_idx)
-        right_global = min(right_global, end_idx)
-        if right_global <= left_global:
-            left_global = start_idx
-            right_global = end_idx
-
-        partition_bounds.append((int(entry["tid"]), int(left_global), int(right_global)))
-
     global_start_idx = int(min(int(entry["start_idx"]) for entry in row_entries))
     global_end_idx = int(max(int(entry["end_idx"]) for entry in row_entries))
     n_global = max(0, global_end_idx - global_start_idx)
+
     if n_global <= 0:
         meta.update({"stitch_mode": "empty_global_window"})
         return np.array([], dtype=float), [], meta
 
-    accum = np.zeros(n_global, dtype=float)
-    weights = np.zeros(n_global, dtype=float)
-    row_offsets: List[float] = []
+    stitched = np.full(n_global, np.nan, dtype=float)
+    overlap_samples = []
 
-    for entry in row_entries:
+    # Sort by time to place correctly
+    row_entries.sort(key=lambda x: (int(x["start_idx"]), int(x["tid"])))
+
+    for i, entry in enumerate(row_entries):
         s_abs = int(entry["start_idx"])
         e_abs = int(entry["end_idx"])
         s = int(s_abs - global_start_idx)
         e = int(e_abs - global_start_idx)
         tr = np.asarray(entry["trace"], dtype=float).copy()
+
         if tr.size == 0 or e <= s:
-            row_offsets.append(0.0)
             continue
 
-        valid_tr = np.isfinite(tr)
-        overlap_mask = (weights[s:e] > 0) & valid_tr
-        if int(np.sum(overlap_mask)) >= 5:
-            base_overlap = accum[s:e][overlap_mask] / np.maximum(weights[s:e][overlap_mask], 1e-12)
-            delta = float(np.median(base_overlap - tr[overlap_mask]))
-            tr = tr + delta
-            row_offsets.append(delta)
+        valid_mask = np.isfinite(tr)
+        target_valid = np.isfinite(stitched[s:e])
+        conflict = valid_mask & target_valid
+
+        if np.any(conflict):
+            overlap_samples.append(np.sum(conflict))
+            # No median shift. Just take the existing value or overwrite.
+            # We'll just overwrite.
+            stitched[s:e][conflict] = tr[conflict]
+
+            # Place non-conflicting new values
+            place_new = valid_mask & ~target_valid
+            stitched[s:e][place_new] = tr[place_new]
         else:
-            row_offsets.append(0.0)
+            stitched[s:e][valid_mask] = tr[valid_mask]
 
-        accum[s:e][valid_tr] += tr[valid_tr]
-        weights[s:e][valid_tr] += 1.0
-
-    valid = weights > 0
+    valid = np.isfinite(stitched)
     if not np.any(valid):
         meta.update({"stitch_mode": "empty_post_blending"})
         return np.array([], dtype=float), [], meta
 
     first_valid = int(np.argmax(valid))
     last_valid = int(len(valid) - np.argmax(valid[::-1]))
-    blended = np.full(last_valid - first_valid, np.nan, dtype=float)
-    w_block = weights[first_valid:last_valid]
-    a_block = accum[first_valid:last_valid]
-    ok = w_block > 0
-    blended[ok] = a_block[ok] / np.maximum(w_block[ok], 1e-12)
+    stitched = stitched[first_valid:last_valid]
 
-    gap_mask = ~np.isfinite(blended)
+    gap_mask = ~np.isfinite(stitched)
     internal_gap_count = int(np.sum(gap_mask))
     stitched_gap_ranges_samples: List[List[int]] = []
     if internal_gap_count > 0:
@@ -533,44 +567,38 @@ def build_concatenated_signal(
                 run_start = gi_i
             run_prev = gi_i
         stitched_gap_ranges_samples.append([int(run_start), int(run_prev + 1)])
-    # Step 09: do not interpolate internal missing values. Leave them as np.nan
-    # so they remain marked as invalid and maintain position.
-
-    stitched = baseline_shift_percentile(blended, p=5.0)
 
     seg_meta: List[Tuple[int, int, int, float, int]] = []
-    for tid, l_abs, r_abs in partition_bounds:
-        l = int(l_abs - global_start_idx - first_valid)
-        r = int(r_abs - global_start_idx - first_valid)
+    for entry in row_entries:
+        s_abs = int(entry["start_idx"])
+        e_abs = int(entry["end_idx"])
+        l = int(s_abs - global_start_idx - first_valid)
+        r = int(e_abs - global_start_idx - first_valid)
         l = max(0, l)
         r = min(stitched.size, r)
         if r <= l:
             continue
         seg = stitched[l:r]
         nm = estimate_noise_mad(seg)
-        seg_meta.append((int(tid), int(l), int(r), float(nm), int(r - l)))
+        seg_meta.append((int(entry["tid"]), int(l), int(r), float(nm), int(r - l)))
 
     median_overlap = float(np.median(overlap_samples)) if overlap_samples else 0.0
-    offset_abs = np.abs(np.asarray(row_offsets, dtype=float))
-    median_offset = float(np.median(offset_abs)) if offset_abs.size else 0.0
-    max_offset = float(np.max(offset_abs)) if offset_abs.size else 0.0
     time_origin_s = float(global_begin + (first_valid / fs))
     meta.update(
         {
-            "stitch_mode": "overlap_weighted_blend",
+            "stitch_mode": "strict_time_aligned",
             "stitch_used_begin_end": bool(use_begin_end),
             "stitch_global_begin": float(global_begin),
             "stitch_median_overlap_samples": float(median_overlap),
             "stitch_rows": int(len(row_entries)),
             "stitch_internal_gap_samples": int(internal_gap_count),
             "stitched_gap_ranges_samples": stitched_gap_ranges_samples,
-            "stitch_median_row_offset": float(median_offset),
-            "stitch_max_row_offset": float(max_offset),
+            "stitch_median_row_offset": 0.0,
+            "stitch_max_row_offset": 0.0,
             "time_origin_s": float(time_origin_s),
         }
     )
     return stitched, seg_meta, meta
-
 def build_transient_id_vector(sig_len: int, seg_meta: List[Tuple[int, int, int, float, int]]) -> np.ndarray:
     out = np.full(sig_len, -1, dtype=int)
     for tid, s, e, _, _ in seg_meta:

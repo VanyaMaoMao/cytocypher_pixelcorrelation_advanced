@@ -41,7 +41,6 @@ def test_missing_data_robustness_clean(tmp_path):
     assert count_clean == 10
     assert meta_clean.get("qc_pass", True) or meta_clean.get("quality_status") == "PASS"
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NaN downstream handling produces hundreds of artifacts. Fix in step 12-13.")
 def test_missing_data_robustness_nan(tmp_path):
     config = BeatCounterConfig()
 

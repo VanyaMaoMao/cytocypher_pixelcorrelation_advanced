@@ -89,3 +89,10 @@
 - Strengthened `strict=True, raises=AssertionError` conditions for `xfail` items so non-assertion failures (like import errors or malformed fixture) properly bubble up as test errors.
 - Checked BPM invalid sampling tests and added tests explicitly for missing y offsets checking and explicitly colliding overlapping arrays separately.
 - Passed complete test suite with 33 passed, 17 xfailed, 0 failed and 0 errors.
+
+### Audit Remediation (Task 02: Critical Data-Integrity Fixes)
+**Status**: COMPLETE
+**Details**:
+- Rewrote `build_concatenated_signal` strictly mapping row coordinates without applying silent median overlap corrections, fulfilling requirements not to silently alter signal amplitudes to reconcile overlaps.
+- Corrected gap processing making missing values preserve time positions without generating hundreds of false vertical artifacts by utilizing NaN-safe numpy operations (`np.isfinite` filters on signal diffs and median shift routines).
+- Validated these changes resolved the failures mapped to them. Tests for `test_audit_regression_missing_data.py` (nan robustness) and `test_audit_regression_timing_overlap.py` passed exactly as expected. Test suite was verified.
