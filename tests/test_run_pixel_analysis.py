@@ -32,7 +32,7 @@ def test_make_summary_dataframe_status_fields():
         "n_main": 10,
         "n_main_primary": 10,
         "n_rescue": 0,
-        "meta": {"qc_pass": True, "qc_reason": "ok"}
+        "meta": {"qc_pass": True, "qc_reason": "ok", "bpm_file_duration": 60.0}
     }]
     df_pass = _make_summary_dataframe(segment_results_pass, stim_hz=1.0, recording_s=10.0)
     assert df_pass.iloc[0]["Status"] == "PASS"
@@ -45,7 +45,7 @@ def test_make_summary_dataframe_status_fields():
         "n_main": 5,
         "n_main_primary": 5,
         "n_rescue": 0,
-        "meta": {"qc_pass": False, "qc_reason": "low_snr"}
+        "meta": {"qc_pass": False, "qc_reason": "low_snr", "bpm_file_duration": 30.0}
     }]
     df_reject = _make_summary_dataframe(segment_results_reject, stim_hz=1.0, recording_s=10.0)
     assert df_reject.iloc[0]["Status"] == "REJECT"
@@ -60,13 +60,13 @@ def test_make_summary_dataframe_status_fields():
         "n_main": 0,
         "n_main_primary": 0,
         "n_rescue": 0,
-        "meta": {"qc_pass": False, "qc_reason": "runtime_error_ValueError"}
+        "meta": {"qc_pass": False, "qc_reason": "runtime_error_ValueError", "bpm_file_duration": np.nan}
     }]
     df_error = _make_summary_dataframe(segment_results_error, stim_hz=1.0, recording_s=10.0)
     assert df_error.iloc[0]["Status"] == "ERROR"
     assert np.isnan(df_error.iloc[0]["Accepted BPM"])
     assert np.isnan(df_error.iloc[0]["Accepted events"])
-    assert df_error.iloc[0]["Diagnostic BPM"] == 0.0
+    assert np.isnan(df_error.iloc[0]["Diagnostic BPM"])
     assert df_error.iloc[0]["Diagnostic events"] == 0
 
 
