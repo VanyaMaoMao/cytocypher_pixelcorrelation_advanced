@@ -66,3 +66,15 @@
 - Simplified `_collect_main_events_table` in `pixel_counter/reporting.py` to seamlessly aggregate the standardized and canonical output arrays.
 - Ensured sample ID properly cascades directly from analysis stages directly into the compiled dataframes.
 - Validated modifications using newly added integration tests inside `tests/test_canonical_events.py`.
+
+### Audit Remediation (Task 01: Regression Tests)
+**Status**: COMPLETE
+**Details**:
+- Validated current HEAD and established regression test baseline for steps 01-11 issues detailed in the independent audit.
+- Created `tests/test_audit_regression_row_partition.py` reproducing the 40-peak counterexample showing partition dependence (marked strict xfail for steps 14-18).
+- Created `tests/test_audit_regression_missing_data.py` proving NaN presence falsely generates hundreds of artifacts instead of properly ignoring gaps (marked strict xfail).
+- Created `tests/test_audit_regression_timing_overlap.py` verifying legacy padding and median overlap correction silently drops and shifts data incorrectly (marked strict xfail).
+- Created `tests/test_audit_regression_canonical.py` reproducing duplicate event IDs across rescue/main boundaries and missing rescue events in peak debug outputs (marked strict xfail).
+- Created `tests/test_audit_regression_io.py` testing for un-validated silent 250Hz missing sampling frequency and output-collision issues, including missing y-offset columns and conflicting sampling frequencies handling.
+- Created `tests/test_audit_regression_bpm.py` testing for denominator discrepancy between results layer and reporting layers, as well as REJECT instances incorrectly reporting 0 BPM rather than NaN (marked strict xfail).
+- Added `generate_baseline.py` script to export real-world test results per segment to `docs/real_data_baseline.json` as a regression snapshot prior to code modifications.
