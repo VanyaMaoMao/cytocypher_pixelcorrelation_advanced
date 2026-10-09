@@ -418,43 +418,32 @@ def build_raw_cytocypher_docx_report(
 def _collect_main_events_table(segment_results: Sequence[Dict]) -> pd.DataFrame:
     rows: List[pd.DataFrame] = []
     for i, seg in enumerate(segment_results):
-        seg_name = str(seg.get("sheet_name", f"Segment {i + 1}"))
-        sample_id = _sample_id_as_value(seg.get("sample_id", np.nan))
-        seg_idx = int(seg.get("segment_no", i + 1))
-
         df_main = seg.get("events")
-        if isinstance(df_main, pd.DataFrame) and (not df_main.empty):
-            seg_main = df_main.copy()
-            for c in ["Time_s", "Type", "Amp", "Prom", "Width_s", "Transient"]:
-                if c not in seg_main.columns:
-                    seg_main[c] = np.nan
-            seg_main = seg_main[["Time_s", "Type", "Amp", "Prom", "Width_s", "Transient"]]
-            seg_main.insert(0, "Segment", seg_name)
-            seg_main.insert(1, "Sample ID", sample_id)
-            seg_main.insert(2, "SegmentIndex", seg_idx)
-            rows.append(seg_main)
-
-        meta = dict(seg.get("meta", {}) or {})
-        rescue_df = _rescue_events_df_from_meta(
-            meta,
-            np.asarray(meta.get("_time_plot", []), dtype=float),
-            np.asarray(meta.get("_sig_plot", []), dtype=float),
-        )
-        if not rescue_df.empty:
-            rescue_rows = rescue_df.copy()
-            rescue_rows["Type"] = "Rescue"
-            rescue_rows["Transient"] = np.nan
-            rescue_rows = rescue_rows[["Time_s", "Type", "Amp", "Prom", "Width_s", "Transient"]]
-            rescue_rows.insert(0, "Segment", seg_name)
-            rescue_rows.insert(1, "Sample ID", sample_id)
-            rescue_rows.insert(2, "SegmentIndex", seg_idx)
-            rows.append(rescue_rows)
+        if isinstance(df_main, pd.DataFrame) and not df_main.empty:
+            rows.append(df_main.copy())
 
     if not rows:
-        return pd.DataFrame(columns=["Segment", "Sample ID", "SegmentIndex", "Time_s", "Type", "Amp", "Prom", "Width_s", "Transient"])
+        return pd.DataFrame(
+            columns=[
+                "event_id",
+                "segment_name",
+                "segment_index",
+                "sample_id",
+                "candidate_index",
+                "Time_s",
+                "Type",
+                "Amp",
+                "Prom",
+                "Width_s",
+                "Transient",
+                "detection_source",
+                "decision_status",
+                "decision_reasons",
+            ]
+        )
     out = pd.concat(rows, ignore_index=True, sort=False)
     out["Time_s"] = pd.to_numeric(out["Time_s"], errors="coerce")
-    return out.sort_values(["SegmentIndex", "Time_s"]).reset_index(drop=True)
+    return out.sort_values(["segment_index", "Time_s"]).reset_index(drop=True)
 
 
 def _collect_afc_events_table(afc_events: Optional[Sequence[AFCEvent]], segment_results: Sequence[Dict]) -> pd.DataFrame:
@@ -568,6 +557,7 @@ def _build_clean_summary_sheet(
         mm = main_events_df.copy()
         mm["Prom"] = pd.to_numeric(mm.get("Prom", np.nan), errors="coerce")
         mm["Amp"] = pd.to_numeric(mm.get("Amp", np.nan), errors="coerce")
+        mm["Segment"] = mm.get("segment_name", mm.get("Segment", np.nan))
         avg_df = (
             mm.groupby("Segment", as_index=False)
             .agg(**{"Average Prom": ("Prom", "mean"), "Average AMP": ("Amp", "mean")})

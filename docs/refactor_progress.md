@@ -58,3 +58,11 @@
 - Verified `build_concatenated_signal` evaluates the valid overlap/gaps dynamically using `np.isnan` tracking correctly mapped against `Begin/End` coordinates. Gaps appropriately remain `NaN`.
 - Refactored `build_transient_id_vector` to assign a deterministic sentinel `-1` instead of allocating an uninitialized `np.empty` structure. This ensures sections without measurements appropriately fall back rather than emitting invalid memory traces or arbitrarily combining with unassociated overlaps.
 - Extended regression tests specifically checking overlap blending intervals and testing that sentinel IDs properly apply in missing data fields across boundaries without error.
+
+## 11. Canonical events, full debug, and Sample ID
+- Updated `build_events_dataframe` and `_build_peak_debug_rows` in `pixel_counter/analysis.py` to output a fully unified event schema.
+- Added explicit tracking and reporting of new standard fields: `event_id`/`candidate_id`, `segment_name`, `segment_index`, `sample_id`, `candidate_index`, `detection_source`, and `decision_status`.
+- Integrated `rescue` peaks directly within the `build_events_dataframe` pass, avoiding redundant and error-prone retroactive building from metadata blocks during reporting.
+- Simplified `_collect_main_events_table` in `pixel_counter/reporting.py` to seamlessly aggregate the standardized and canonical output arrays.
+- Ensured sample ID properly cascades directly from analysis stages directly into the compiled dataframes.
+- Validated modifications using newly added integration tests inside `tests/test_canonical_events.py`.

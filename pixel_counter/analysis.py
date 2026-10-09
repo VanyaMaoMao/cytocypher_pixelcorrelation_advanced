@@ -129,6 +129,7 @@ def _build_peak_debug_rows(
     *,
     segment_name: str,
     segment_index: int,
+    sample_id: object,
     time: np.ndarray,
     sig: np.ndarray,
     raw_peaks_all: np.ndarray,
@@ -212,9 +213,12 @@ def _build_peak_debug_rows(
 
         rows.append(
             {
+                "candidate_id": f"cand_s{segment_index}_{pk_i}",
                 "segment_name": str(segment_name),
                 "segment_index": int(segment_index),
+                "sample_id": sample_id,
                 "peak_index_raw": int(i),
+                "candidate_index": pk_i,
                 "time_s": float(t_s),
                 "amplitude": float(amp),
                 "prominence": float(pr_f),
@@ -1131,6 +1135,9 @@ def build_events_dataframe(
     main_widths: np.ndarray,
     main_tids: np.ndarray,
     *,
+    segment_name: str = "",
+    segment_index: int = -1,
+    sample_id: object = np.nan,
     rescue_peaks: Optional[np.ndarray] = None,
     rescue_audit_by_peak: Optional[Dict[int, Dict]] = None,
     rescue_peak_tid_map: Optional[Dict[int, int]] = None,
@@ -1138,16 +1145,27 @@ def build_events_dataframe(
     rescue_peak_width_map: Optional[Dict[int, float]] = None,
 ) -> pd.DataFrame:
     rows: List[Dict] = []
-
+    
+    # Pre-generate unique IDs based on candidate sample index
+    
     for pk, pr, wd, tid in zip(main_peaks, main_proms, main_widths, main_tids):
+        pk_i = int(pk)
         rows.append(
             {
-                "Time_s": float(time[int(pk)]),
+                "event_id": f"evt_s{segment_index}_{pk_i}",
+                "segment_name": segment_name,
+                "segment_index": segment_index,
+                "sample_id": sample_id,
+                "candidate_index": pk_i,
+                "Time_s": float(time[pk_i]),
                 "Type": "Main Beat",
-                "Amp": float(sig[int(pk)]),
+                "Amp": float(sig[pk_i]),
                 "Prom": float(pr),
                 "Width_s": float(wd),
                 "Transient": int(tid) + 1,
+                "detection_source": "main_peak_pipeline",
+                "decision_status": "accepted",
+                "decision_reasons": "",
                 "RescueType": "",
                 "RescueGapBefore_s": np.nan,
                 "RescueGapAfter_s": np.nan,
@@ -1163,18 +1181,27 @@ def build_events_dataframe(
     rescue_peak_prom_map = rescue_peak_prom_map or {}
     rescue_peak_width_map = rescue_peak_width_map or {}
     for pk in rescue_idxs.tolist():
-        if int(pk) < 0 or int(pk) >= time.size:
+        pk_i = int(pk)
+        if pk_i < 0 or pk_i >= time.size:
             continue
-        audit = rescue_audit_by_peak.get(int(pk), {})
-        tid = rescue_peak_tid_map.get(int(pk), -1)
+        audit = rescue_audit_by_peak.get(pk_i, {})
+        tid = rescue_peak_tid_map.get(pk_i, -1)
         rows.append(
             {
-                "Time_s": float(time[int(pk)]),
+                "event_id": f"evt_s{segment_index}_{pk_i}",
+                "segment_name": segment_name,
+                "segment_index": segment_index,
+                "sample_id": sample_id,
+                "candidate_index": pk_i,
+                "Time_s": float(time[pk_i]),
                 "Type": "Rescue",
-                "Amp": float(sig[int(pk)]),
-                "Prom": float(rescue_peak_prom_map.get(int(pk), audit.get("prominence", np.nan))),
-                "Width_s": float(rescue_peak_width_map.get(int(pk), audit.get("width_s", np.nan))),
+                "Amp": float(sig[pk_i]),
+                "Prom": float(rescue_peak_prom_map.get(pk_i, audit.get("prominence", np.nan))),
+                "Width_s": float(rescue_peak_width_map.get(pk_i, audit.get("width_s", np.nan))),
                 "Transient": (int(tid) + 1) if int(tid) >= 0 else np.nan,
+                "detection_source": "rescue_pipeline",
+                "decision_status": "accepted",
+                "decision_reasons": str(audit.get("rescue_type", "other")),
                 "RescueType": str(audit.get("rescue_type", "other")),
                 "RescueGapBefore_s": float(audit.get("gap_before_s", np.nan)),
                 "RescueGapAfter_s": float(audit.get("gap_after_s", np.nan)),
@@ -1187,12 +1214,20 @@ def build_events_dataframe(
     if not rows:
         return pd.DataFrame(
             columns=[
+                "event_id",
+                "segment_name",
+                "segment_index",
+                "sample_id",
+                "candidate_index",
                 "Time_s",
                 "Type",
                 "Amp",
                 "Prom",
                 "Width_s",
                 "Transient",
+                "detection_source",
+                "decision_status",
+                "decision_reasons",
                 "RescueType",
                 "RescueGapBefore_s",
                 "RescueGapAfter_s",
@@ -2215,17 +2250,26 @@ def _analyze_prebuilt_signal(
     df_source: pd.DataFrame,
     y_cols_source: List[str],
     *,
+    sample_id: object = np.nan,
     enable_close_peak_recovery: bool = True,
     debug_timing: bool = False,
 ) -> Tuple[float, int, pd.DataFrame, Dict]:
     empty = pd.DataFrame(
         columns=[
+            "event_id",
+            "segment_name",
+            "segment_index",
+            "sample_id",
+            "candidate_index",
             "Time_s",
             "Type",
             "Amp",
             "Prom",
             "Width_s",
             "Transient",
+            "detection_source",
+            "decision_status",
+            "decision_reasons",
             "RescueType",
             "RescueGapBefore_s",
             "RescueGapAfter_s",
@@ -2396,6 +2440,7 @@ def _analyze_prebuilt_signal(
         rows = _build_peak_debug_rows(
             segment_name=seg_name_for_debug,
             segment_index=seg_idx_for_debug,
+            sample_id=sample_id,
             time=time,
             sig=sig,
             raw_peaks_all=raw_peaks_all,
@@ -2715,6 +2760,9 @@ def _analyze_prebuilt_signal(
         main_proms=main_proms,
         main_widths=main_widths,
         main_tids=main_tids,
+        segment_name=seg_name_for_debug,
+        segment_index=seg_idx_for_debug,
+        sample_id=sample_id,
         rescue_peaks=rescue_peaks_arr,
         rescue_audit_by_peak=rescue_audit_by_peak,
         rescue_peak_tid_map=rescue_peak_tid_map,
@@ -2997,6 +3045,7 @@ def count_main_beats_from_excel(
             candidate_label=cand_label,
             df_source=df,
             y_cols_source=y_cols,
+            sample_id=sample_id,
             enable_close_peak_recovery=False,
             debug_timing=bool(debug),
         )
@@ -3031,6 +3080,7 @@ def count_main_beats_from_excel(
         candidate_label=selected_label,
         df_source=df,
         y_cols_source=y_cols,
+        sample_id=sample_id,
         enable_close_peak_recovery=True,
         debug_timing=bool(debug),
     )
