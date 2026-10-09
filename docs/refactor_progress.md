@@ -114,3 +114,9 @@
 - Rewrote conflict resolution inside `build_concatenated_signal`. True overlapping matches are placed accurately without double-counting.
 - Genuinely conflicting samples are now marked as `np.nan` and logged as metadata variables (`stitch_overlap_conflicts`, `stitch_overlap_conflict_indices`) rather than silently overwritten or averaged.
 - Passed test suite against updated rules, including specific validation of conflict NaN handling inside `test_audit_regression_timing_overlap.py`.
+
+## 14. Experimental Global Detector
+- Implemented `detect_events_v2` inside `pixel_counter/analysis.py`. It performs experimental robust global detection by parsing contiguous blocks devoid of internal missing data values.
+- Applies a block-local detrend filter utilizing `scipy.signal.medfilt` ensuring block independence.
+- Supports explicit inversion polarity and yields exact candidate samples mapped perfectly without boundary interference from row partitioning.
+- Added comprehensive tests inside `test_detect_events_v2.py` targeting missing data integrity, polarity accuracy, row-boundary edge cases, synthetic signal integrity, and isolated block failure avoidance.
