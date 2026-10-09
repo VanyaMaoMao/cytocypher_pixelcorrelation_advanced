@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 from pixel_counter.analysis import count_main_beats_from_excel
 from pixel_counter.config import BeatCounterConfig
-import warnings
 
 def generate_partitioned_df(samples_per_row):
     fs = 250.0
@@ -22,30 +21,33 @@ def generate_partitioned_df(samples_per_row):
 
     return pd.DataFrame(rows)
 
-@pytest.mark.xfail(strict=True, reason="Legacy detector depends on row partition. Fix in steps 14-18.")
-def test_row_partition_invariance():
+@pytest.mark.parametrize("samples_per_row", [125, 250, 500, 2500])
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="Legacy detector depends on row partition. Fix in steps 14-18.")
+def test_row_partition_invariance(samples_per_row, tmp_path):
     """
-    Test that the same signal produces 40 peaks regardless of how it is partitioned into rows.
-    This demonstrates the legacy detector defect where identical signals yield 36, 24, 21, or 0 beats
-    based on the row length.
+    Test that the same signal produces exactly 40 peaks regardless of how it is partitioned into rows.
+    Legacy results are: 125 -> 36, 250 -> 24, 500 -> 21, 2500 -> 0.
     """
     config = BeatCounterConfig()
+    df = generate_partitioned_df(samples_per_row)
 
-    # In a perfect world all counts should be 40
-    # Current behavior is: 125 -> 36, 250 -> 24, 500 -> 21, 2500 -> 0
-    counts = []
-    for samples_per_row in [125, 250, 500, 2500]:
-        df = generate_partitioned_df(samples_per_row)
+    test_file = tmp_path / "test.xlsx"
+    df.to_excel(test_file, sheet_name="Test Segment", index=False)
 
-        # Suppress plotting and file output for tests
-        bpm, count, events, meta = count_main_beats_from_excel(
-            df,
-            sheet_name="Test Segment",
-            config=config,
-            show_plot=False
-        )
-        counts.append(count)
+    bpm, count, events, meta = count_main_beats_from_excel(
+        str(test_file),
+        sheet_name="Test Segment",
+        config=config,
+        show_plot=False
+    )
 
-    # We expect all counts to equal 40.
-    # Currently this will fail, which is why we xfail(strict=True).
-    assert counts == [40, 40, 40, 40], f"Counts were {counts}, expected [40, 40, 40, 40]"
+    assert count == 40, f"Expected exactly 40 peaks for partition size {samples_per_row}, got {count}"
+
+    # Check that events timestamps are correct
+    centers = 0.125 + 0.25 * np.arange(40)
+    acc = events[events["decision_status"] == "accepted"]
+    timestamps = acc["Time_s"].values if "Time_s" in acc.columns else acc["time_s"].values
+
+    # Allow 2 samples (8ms) tolerance due to peak extraction interpolation/finding
+    assert len(timestamps) == 40, "Length of accepted timestamps must equal 40"
+    assert np.allclose(timestamps, centers, atol=0.008), "Timestamps deviate too far from ground truth centers"

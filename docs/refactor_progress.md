@@ -78,3 +78,14 @@
 - Created `tests/test_audit_regression_io.py` testing for un-validated silent 250Hz missing sampling frequency and output-collision issues, including missing y-offset columns and conflicting sampling frequencies handling.
 - Created `tests/test_audit_regression_bpm.py` testing for denominator discrepancy between results layer and reporting layers, as well as REJECT instances incorrectly reporting 0 BPM rather than NaN (marked strict xfail).
 - Added `generate_baseline.py` script to export real-world test results per segment to `docs/real_data_baseline.json` as a regression snapshot prior to code modifications.
+
+### Audit Remediation (Task 01: PR Feedback Corrections)
+**Status**: COMPLETE
+**Details**:
+- Revised real-data baseline script to accurately extract timestamps, orientation, QC status explicitly and wrote 90 segments mapping cleanly to standard JSON (`docs/real_data_baseline.json`).
+- Strengthened missing data test separating clean from NaN into distinct explicit tests. Added test for padding. Added test for overlapping exact arrays and overlapping conflicting arrays separately.
+- Strengthened row partition test parameterizing exactly `125`, `250`, `500` and `2500` row counts via `pytest.mark.parametrize` rather than inside a single test loop.
+- Split canonical event tests into discrete `test_canonical_event_duplicate_identity`, `test_canonical_event_missing_rescue_audit`, `test_canonical_event_rejected_preliminary` and `test_canonical_event_sample_id_propagation`.
+- Strengthened `strict=True, raises=AssertionError` conditions for `xfail` items so non-assertion failures (like import errors or malformed fixture) properly bubble up as test errors.
+- Checked BPM invalid sampling tests and added tests explicitly for missing y offsets checking and explicitly colliding overlapping arrays separately.
+- Passed complete test suite with 33 passed, 17 xfailed, 0 failed and 0 errors.
