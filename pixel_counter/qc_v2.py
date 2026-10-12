@@ -152,9 +152,13 @@ def evaluate_qc_v2(
         if len(t1) == 0 or len(t2) == 0:
             return 0
         matches = 0
+        used_t2 = np.zeros(len(t2), dtype=bool)
         for t in t1:
-            # One-to-one matching: just check if there is a close peak
-            if np.any(np.abs(t2 - t) <= tol):
+            diffs = np.abs(t2 - t)
+            valid_idx = np.where((diffs <= tol) & (~used_t2))[0]
+            if len(valid_idx) > 0:
+                best_match = valid_idx[np.argmin(diffs[valid_idx])]
+                used_t2[best_match] = True
                 matches += 1
         return matches
 

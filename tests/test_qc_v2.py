@@ -226,3 +226,41 @@ def test_qc_v2_timestamp_instability(monkeypatch):
     assert qc_meta["stability_match_high"] == 0 # no timestamps match
     assert status == "REVIEW"
     assert reason == "sensitivity_instability"
+
+def test_qc_v2_competing_matches(monkeypatch):
+    """Competing matches for the same event should only count once in sensitivity diagnostic."""
+    fs = 250.0
+    sig = np.zeros(1000)
+    config = BeatCounterConfig()
+
+    # Baseline has 3 peaks very close together
+    cands = {
+        "candidate_index": np.array([250, 252, 254]),
+        "time_s": np.array([1.0, 1.008, 1.016]),
+        "amplitude": np.array([0.2, 0.2, 0.2]),
+        "prominence": np.array([0.2, 0.2, 0.2]),
+        "width_s": np.array([0.02, 0.02, 0.02]),
+        "polarity": np.array([1, 1, 1]),
+        "status": np.array(["PASS", "PASS", "PASS"], dtype=object)
+    }
+
+    meta = {"candidate_selection_reason": "auto_selected_positive", "best_polarity": 1}
+
+    def mock_detect(sig, fs, config, polarity=1):
+        # Comparison has only 1 peak that is within tolerance (0.01) of multiple baseline peaks.
+        # It is exactly at 1.008, which is within 0.01 of 1.0 and 1.016.
+        # But it can only match ONE of them.
+        return {
+            "candidate_index": np.array([252]),
+            "time_s": np.array([1.008]),
+            "status": np.array(["PASS"], dtype=object)
+        }
+
+    monkeypatch.setattr("pixel_counter.analysis.detect_events_v2", mock_detect)
+
+    from pixel_counter.qc_v2 import evaluate_qc_v2
+    status, reason, qc_meta = evaluate_qc_v2(sig, fs, cands, meta, config)
+
+    # Because only 1 peak is returned, matches should be exactly 1, not 2 or 3.
+    assert qc_meta["stability_match_high"] == 1
+    assert qc_meta["stability_match_low"] == 1
