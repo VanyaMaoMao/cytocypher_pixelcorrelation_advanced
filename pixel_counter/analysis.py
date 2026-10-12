@@ -3345,7 +3345,11 @@ def deduplicate_events_v2(
         dt_s = (idx_R - idx_L) / max(fs, 1e-9)
 
         if idx_R < len(sig):
-            amp_L = float(sig[idx_L]) if 0 <= idx_L < len(sig) else 0.0
+            # Check for NaN gap between candidates
+            if np.any(np.isnan(sig[idx_L : idx_R + 1])):
+                return False, ""
+
+            amp_L = float(sig[idx_L]) if 0 <= idx_L < len(sig) else 0.0 if 0 <= idx_L < len(sig) else 0.0
             amp_R = float(sig[idx_R]) if 0 <= idx_R < len(sig) else 0.0
 
             # Use polarity for valley logic. The valley is the value closest to baseline (0.0).

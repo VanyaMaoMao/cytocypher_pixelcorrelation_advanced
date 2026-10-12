@@ -130,3 +130,4 @@
 - Integrated a `REVIEW` marker that triggers natively instead of assigning arbitrary status whenever closely neighboring candidates possess indistinguishable parameters beneath sampling resolutions.
 - Reverted all attempted modifications to the legacy `deduplicate_main_candidates` framework, fully complying with instructions protecting existing step logic inside `_analyze_prebuilt_signal`, `build_events_dataframe`, and metrics schemas.
 - Ran robust integration test schemas encompassing shoulder peaks, deep valley exclusions, sub-sampling arrays, missing artifacts and 10+ Hz fast-beat rhythms validating accuracy thresholds and suppression decisions safely against synthetics in `test_detect_events_v2.py`.
+- Implemented a protective condition verifying that neighboring candidate regions across actual `NaN` boundaries implicitly fail physical group merging configurations to explicitly prohibit temporal artifact collisions connecting disparate signal blocks.

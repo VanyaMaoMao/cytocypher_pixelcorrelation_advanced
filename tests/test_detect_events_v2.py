@@ -245,3 +245,40 @@ def test_dedup_flag_for_review():
     # Should deduplicate to 1, but be flagged for review
     assert res["candidate_index"].size == 1
     assert res["status"][0] == "REVIEW"
+
+def test_dedup_never_merge_across_nan_gap():
+    """Verify that candidates separated by a NaN gap are never merged, regardless of proximity."""
+    fs = 250.0
+    t = np.arange(1000) / fs
+    signal = np.zeros_like(t)
+
+    # Insert two extremely close peaks
+    c1, c2 = 1.0, 1.02 # 0.02s apart (well within min_biological_period_s)
+    signal += 0.2 * np.exp(-0.5 * ((t - c1) / 0.005) ** 2)
+    signal += 0.2 * np.exp(-0.5 * ((t - c2) / 0.005) ** 2)
+
+    # Insert a NaN gap precisely between them
+    idx_c1 = int(c1 * fs)
+    idx_c2 = int(c2 * fs)
+    valley_idx = (idx_c1 + idx_c2) // 2
+    signal[valley_idx] = np.nan
+
+    config = BeatCounterConfig(prom0=0.01, min_peak_distance_s=0.0)
+
+    # We test deduplicate_events_v2 directly
+    from pixel_counter.analysis import deduplicate_events_v2
+    cands = {
+        "candidate_index": np.array([idx_c1, idx_c2]),
+        "time_s": np.array([c1, c2]),
+        "amplitude": np.array([0.2, 0.2]),
+        "prominence": np.array([0.2, 0.2]),
+        "width_s": np.array([0.01, 0.01]),
+        "polarity": np.array([1, 1])
+    }
+
+    res = deduplicate_events_v2(signal, fs, cands, config)
+
+    # They should not be merged because they are separated by NaN
+    assert res["candidate_index"].size == 2
+    assert res["status"][0] == "PASS"
+    assert res["status"][1] == "PASS"
