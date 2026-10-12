@@ -80,8 +80,9 @@ def test_qc_v2_technical_corruption():
     sig_clip = sig.copy()
     sig_clip[100:300] = 1.0 # Long flat top
     res_clip = analyze_v2_pipeline(sig_clip, fs, BeatCounterConfig())
-    assert res_clip["metadata"]["qc_status"] == "REJECT"
+    assert res_clip["metadata"]["qc_status"] == "REVIEW"
     assert res_clip["metadata"]["qc_reason"] == "signal_clipping"
+
 
 def test_qc_v2_row_partition_invariance():
     """Repartitioning identical signals into different Excel rows does not change QC decisions."""
@@ -186,3 +187,42 @@ def test_qc_v2_threshold_sensitivity():
     assert meta["stability_count_low"] == len(centers)
     assert meta["stability_match_high"] == len(centers)
     assert meta["stability_match_low"] == len(centers)
+
+
+
+def test_qc_v2_timestamp_instability(monkeypatch):
+    """Timestamp instability -> REVIEW (even if event counts remain identical)."""
+    fs = 250.0
+    sig = np.zeros(1000)
+
+    config = BeatCounterConfig()
+
+    cands = {
+        "candidate_index": np.array([250, 500, 750]),
+        "time_s": np.array([1.0, 2.0, 3.0]),
+        "amplitude": np.array([0.2, 0.2, 0.2]),
+        "prominence": np.array([0.2, 0.2, 0.2]),
+        "width_s": np.array([0.02, 0.02, 0.02]),
+        "polarity": np.array([1, 1, 1]),
+        "status": np.array(["PASS", "PASS", "PASS"], dtype=object)
+    }
+
+    meta = {"candidate_selection_reason": "auto_selected_positive", "best_polarity": 1}
+
+    def mock_detect(sig, fs, config, polarity=1):
+        # Return identical counts but shifted timestamps
+        return {
+            "candidate_index": np.array([260, 510, 760]),
+            "time_s": np.array([1.04, 2.04, 3.04]), # shifted by 40ms (tol is 10ms)
+            "status": np.array(["PASS", "PASS", "PASS"], dtype=object)
+        }
+
+    monkeypatch.setattr("pixel_counter.analysis.detect_events_v2", mock_detect)
+
+    from pixel_counter.qc_v2 import evaluate_qc_v2
+    status, reason, qc_meta = evaluate_qc_v2(sig, fs, cands, meta, config)
+
+    assert qc_meta["stability_count_high"] == 3
+    assert qc_meta["stability_match_high"] == 0 # no timestamps match
+    assert status == "REVIEW"
+    assert reason == "sensitivity_instability"

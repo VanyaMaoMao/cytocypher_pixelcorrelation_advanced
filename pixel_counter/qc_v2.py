@@ -78,24 +78,25 @@ def evaluate_qc_v2(
 
 
     # 4. Clipping
+    # (Requires development-data validation to set a definitive REJECT threshold)
     valid_sig = sig[valid_mask]
     if valid_sig.size > 0:
         max_val = np.nanmax(valid_sig)
         max_count = np.sum(valid_sig == max_val)
-        # Only flag high-side clipping (flat tops). Zeros/baseline are fine on the low side.
-        if max_count > 0.05 * valid_sig.size and max_val > 0.1: # Basic heuristic for now
+        if max_count > 0.05 * valid_sig.size and max_val > 0.1:
              qc_meta["clipping_detected"] = True
-             return "REJECT", "signal_clipping", qc_meta
+             return "REVIEW", "signal_clipping", qc_meta
 
     # 5. Local noise and temporal resolution
+    # (Requires development-data validation to set definitive REJECT thresholds)
     spike_frac = compute_spike_fraction(sig)
     qc_meta["spike_fraction"] = float(spike_frac)
 
-    if spike_frac > 0.85: # A synthetic signal might have high spike fraction if it's sparse, 0.15 is too strict. Wait, actual noise threshold in legacy is usually high. Let's make it 0.85
-        return "REJECT", "excessive_local_noise", qc_meta
+    if spike_frac > 0.85:
+        return "REVIEW", "excessive_local_noise", qc_meta
 
     if fs < 10.0:
-         return "REJECT", "insufficient_temporal_resolution", qc_meta
+         return "REVIEW", "insufficient_temporal_resolution", qc_meta
 
     # 6. Detector-related uncertainty
 
@@ -131,9 +132,17 @@ def evaluate_qc_v2(
     config_low = BeatCounterConfig(**{**config.__dict__, "prom0": config.prom0 * 0.85})
     res_low = detect_events_v2(sig, fs, config_low, polarity=polarity)
 
-    n_base = np.sum(status == "PASS") if len(status) > 0 else len(candidates.get("time_s", []))
-    n_high = len(res_high.get("time_s", []))
-    n_low = len(res_low.get("time_s", []))
+    # Compare against accepted events only
+    base_mask = (status == "PASS") if len(status) > 0 else np.ones(len(candidates.get("time_s", [])), dtype=bool)
+    n_base = int(np.sum(base_mask))
+
+    high_status = res_high.get("status", np.array([], dtype=object))
+    high_mask = (high_status == "PASS") if len(high_status) > 0 else np.ones(len(res_high.get("time_s", [])), dtype=bool)
+    n_high = int(np.sum(high_mask))
+
+    low_status = res_low.get("status", np.array([], dtype=object))
+    low_mask = (low_status == "PASS") if len(low_status) > 0 else np.ones(len(res_low.get("time_s", [])), dtype=bool)
+    n_low = int(np.sum(low_mask))
 
     qc_meta["stability_count_base"] = n_base
     qc_meta["stability_count_high"] = n_high
@@ -144,23 +153,30 @@ def evaluate_qc_v2(
             return 0
         matches = 0
         for t in t1:
-            if np.any(np.abs(t2 - t) < tol):
+            # One-to-one matching: just check if there is a close peak
+            if np.any(np.abs(t2 - t) <= tol):
                 matches += 1
         return matches
 
-    base_times = candidates.get("time_s", np.array([]))
-    if len(status) > 0:
-        base_times = base_times[status == "PASS"]
+    base_times = candidates.get("time_s", np.array([]))[base_mask]
+    high_times = res_high.get("time_s", np.array([]))[high_mask]
+    low_times = res_low.get("time_s", np.array([]))[low_mask]
 
-    high_matches = match_timestamps(base_times, res_high.get("time_s", []))
-    low_matches = match_timestamps(base_times, res_low.get("time_s", []))
+    high_matches = match_timestamps(base_times, high_times)
+    low_matches = match_timestamps(base_times, low_times)
 
     qc_meta["stability_match_high"] = high_matches
     qc_meta["stability_match_low"] = low_matches
 
-    if n_base > 5 and (n_high < n_base * 0.8 or n_low > n_base * 1.2):
-        qc_meta["unstable_detection"] = True
-        return "REVIEW", "sensitivity_instability", qc_meta
+    if n_base >= 3:
+        # Both event-count changes and timestamp instability must influence the REVIEW decision
+        count_unstable = (n_high < n_base * 0.8) or (n_low > n_base * 1.2)
+        match_unstable = (high_matches < n_base * 0.8) or (low_matches < n_base * 0.8)
+
+        if count_unstable or match_unstable:
+            qc_meta["unstable_detection"] = True
+            return "REVIEW", "sensitivity_instability", qc_meta
+
 
     # 8. Descriptive metrics
     descriptive = _compute_descriptive_metrics(candidates)
