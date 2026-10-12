@@ -165,3 +165,22 @@
   - Developed `tests/test_qc_v2.py` verifying all specified edge conditions deterministically.
   - Validated that technically clean signals experiencing genuine but irregular contractions correctly bypass arbitrary rejection algorithms designed around single-metric thresholds (IBI CV).
   - Assured identical continuous signals correctly maintain consistent QC classifications when simulated against varying structural extraction intervals.
+
+### Step 19: Independent Scientific Validation
+- **Status:** BLOCKED
+- **Implementation:**
+  - Implemented the full validation infrastructure inside `pixel_counter/validation/`, addressing the "missing ground truth" fallback condition.
+  - Implemented deterministic synthetic datasets inside `synthetic.py`.
+  - Implemented explicit one-to-one temporal matching between predicted events and annotations using absolute timestamps and a configured tolerance (`matching.py`).
+  - Added metric calculators for Precision, Recall, F1, BPM Error, Count Error, Polarity and QC mapping (`metrics.py`).
+  - Added a `runner.py` that fully executes both the legacy `_analyze_prebuilt_signal` pipeline and the new `analyze_v2_pipeline` over the synthetic dataset.
+  - Produced `docs/validation/synthetic_validation_report.md` showing validation execution, however the report strictly notes this is a synthetic evaluation fallback.
+  - Created `docs/annotation_instructions.md` containing the strict formatting rules, instructions for marking real-world independent events without legacy algorithm bias, and handling ambiguous events.
+- **Testing:**
+  - Validated the matching algorithm inside `tests/test_validation_matching.py`.
+  - Verified `runner.py` successfully executes on the synthetic holdout set without modifying legacy bounds.
+- **Blocker / Conclusion:**
+  - Real, independently annotated experimental validation files are unavailable.
+  - As strictly required by Step 19, the validation status is marked as BLOCKED, not COMPLETE.
+  - The detector is NOT validated for real-world replacement.
+  - Step 20 MUST NOT proceed until the required real-world ground-truth annotations are collected, fed into this validation infrastructure, and formally evaluated against predefined acceptance criteria.
