@@ -114,6 +114,9 @@ class BeatCounterConfig:
 
     use_narrow_retry: bool = True
 
+    v2_two_pass_enabled: bool = False
+    v2_seed_prom_mad_mult: float = 6.0
+
     main_gap_fill_enabled: bool = True
     main_gap_fill_periodicity_min: float = 0.75
     main_gap_fill_corr_min: float = 0.70

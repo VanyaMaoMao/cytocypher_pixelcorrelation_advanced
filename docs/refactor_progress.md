@@ -131,3 +131,10 @@
 - Reverted all attempted modifications to the legacy `deduplicate_main_candidates` framework, fully complying with instructions protecting existing step logic inside `_analyze_prebuilt_signal`, `build_events_dataframe`, and metrics schemas.
 - Ran robust integration test schemas encompassing shoulder peaks, deep valley exclusions, sub-sampling arrays, missing artifacts and 10+ Hz fast-beat rhythms validating accuracy thresholds and suppression decisions safely against synthetics in `test_detect_events_v2.py`.
 - Implemented a protective condition verifying that neighboring candidate regions across actual `NaN` boundaries implicitly fail physical group merging configurations to explicitly prohibit temporal artifact collisions connecting disparate signal blocks.
+
+
+### Step 16: Two-Pass Candidate Refinement
+- **Status:** Complete.
+- **Implementation:** Added `v2_two_pass_enabled` and `v2_seed_prom_mad_mult` configuration parameters to `BeatCounterConfig`. Updated `detect_events_v2` in `pixel_counter/analysis.py` to optionally calculate robust local noise statistics and append `is_seed` and `uncertainty` arrays to candidates.
+- **Testing:** Implemented `tests/test_step16_refinement.py` testing synthetic deterministic scenarios per requirements (unusually high artifact, alternating amplitudes, pure noise, etc.).
+- **Comparison & Conclusion:** The two-pass refinement correctly identifies high-quality seeds against local MAD background noise without permanently discarding weak candidates or applying harsh fixed percentage bands. Because the simpler low-threshold `detect_events_v2` approach is already highly accurate and robust against missing data (Step 14), the two-pass refinement remains optional (`v2_two_pass_enabled = False` by default). This limits pipeline complexity while preserving advanced noise diagnostic capabilities for future research.
