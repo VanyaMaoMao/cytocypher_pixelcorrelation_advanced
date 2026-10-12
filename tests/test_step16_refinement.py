@@ -182,3 +182,60 @@ def test_joint_scaling():
     assert res1["candidate_index"].size == 8
     assert res2["candidate_index"].size == 8
     assert np.all(res1["is_seed"]) == np.all(res2["is_seed"])
+
+
+def test_second_pass_drops_morphological_artifact():
+    """Verify that the second pass explicitly filters an artifact that passes baseline detection."""
+    fs = 250.0
+    t, sig = generate_base_signal(fs, 10.0)
+
+    np.random.seed(42)
+    sig += np.random.normal(0, 0.01, sig.shape)
+
+    # 5 genuine seeds (width ~ 0.02)
+    centers = [1.0, 2.0, 3.0, 4.0, 5.0]
+    for c in centers:
+        add_peak(sig, t, c, 1.0, width=0.02)
+
+    # 1 weak genuine candidate (width ~ 0.02, amp ~ 0.15)
+    # 0.15 is low enough to be a non-seed (if noise_mad=0.01, seed_thr=0.06, wait no 0.15 is > 0.06).
+    # Let's make noise=0.05. Then noise_mad ~ 0.05. seed_thr = 0.3.
+    # So 1 weak genuine (amp=0.25, width=0.02) will NOT be a seed.
+
+    # Let's rebuild the signal with higher noise to test weak candidates
+    np.random.seed(42)
+    t, sig = generate_base_signal(fs, 10.0)
+    sig += np.random.normal(0, 0.05, sig.shape)
+
+    for c in centers:
+        add_peak(sig, t, c, 2.0, width=0.02) # Seeds (amp > 1.0)
+
+    add_peak(sig, t, 6.0, 0.15, width=0.02) # Weak genuine candidate
+
+    # 1 artifact candidate (amp=0.4, width=0.2) -> Much wider than seeds (median width ~ 0.02)
+    # 1 artifact candidate (amp=0.4, width=0.002) -> Too narrow
+    add_peak(sig, t, 7.0, 0.4, width=0.002)
+
+    # Run baseline (two-pass OFF)
+    config_base = BeatCounterConfig(prom0=0.01, v2_two_pass_enabled=False)
+    res_base = detect_events_v2(sig, fs, config_base)
+
+    # Run two-pass ON
+    config_two_pass = BeatCounterConfig(prom0=0.01, v2_two_pass_enabled=True)
+    res_two_pass = detect_events_v2(sig, fs, config_two_pass)
+
+    # The baseline should detect both the weak genuine and the wide artifact
+    # (plus seeds and potentially some noise, but definitely those two if they pass low prom threshold)
+
+    # Let's see if the wide artifact is present in baseline and dropped in two-pass
+    artifact_in_base = any(abs(t_c - 7.0) < 0.2 for t_c in res_base["time_s"])
+    artifact_in_two_pass = any(abs(t_c - 7.0) < 0.2 for t_c in res_two_pass["time_s"])
+
+    # The weak genuine candidate should be preserved in BOTH
+    weak_in_base = any(abs(t_c - 6.0) < 0.1 for t_c in res_base["time_s"])
+    weak_in_two_pass = any(abs(t_c - 6.0) < 0.1 for t_c in res_two_pass["time_s"])
+
+    assert weak_in_base
+    assert weak_in_two_pass
+    assert artifact_in_base
+    assert not artifact_in_two_pass

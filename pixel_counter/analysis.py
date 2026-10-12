@@ -163,24 +163,45 @@ def detect_events_v2(
             widths = widths[valid_pks]
 
             if pks.size > 0:
-
                 if getattr(config, "v2_two_pass_enabled", False):
                     # First pass: High-quality seeds
-                    seed_prom_thr = max(config.prom0, config.v2_seed_prom_mad_mult * noise_mad)
+                    seed_prom_thr = max(config.prom0, getattr(config, "v2_seed_prom_mad_mult", 6.0) * noise_mad)
                     is_seed_arr = proms >= seed_prom_thr
                     seed_proms = proms[is_seed_arr]
+                    seed_widths = widths[is_seed_arr]
 
+                    uncertainty_val = False
                     if seed_proms.size < 3:
                         uncertainty_val = True
                     else:
                         med_prom = float(np.median(seed_proms))
                         mad_prom = float(median_abs_deviation(seed_proms, scale="normal"))
-                        uncertainty_val = (mad_prom > 0.3 * med_prom) if med_prom > 0 else True
+                        if med_prom > 0 and (mad_prom > 0.3 * med_prom):
+                            uncertainty_val = True
 
+                    # Second pass: evaluate the complete candidate set
+                    # We keep all seeds. For non-seeds, we evaluate morphology vs robust seed stats.
+                    keep_mask = np.ones(pks.size, dtype=bool)
+                    if seed_widths.size >= 3 and not uncertainty_val:
+                        med_width = float(np.median(seed_widths))
+                        # Non-seeds must have a reasonable morphology relative to seeds
+                        for i in range(pks.size):
+                            if not is_seed_arr[i]:
+                                # Check morphology (e.g. within [0.25, 4.0] of median width)
+                                w = widths[i]
+                                if w < 0.25 * med_width or w > 4.0 * med_width:
+                                    keep_mask[i] = False
+
+                    # Filter based on second pass
+                    pks = pks[keep_mask]
+                    proms = proms[keep_mask]
+                    widths = widths[keep_mask]
+                    is_seed_arr = is_seed_arr[keep_mask]
                     uncertainty_arr = np.full(pks.size, uncertainty_val, dtype=bool)
                 else:
                     is_seed_arr = np.ones(pks.size, dtype=bool)
                     uncertainty_arr = np.zeros(pks.size, dtype=bool)
+
 
                 # Map back to global indices
                 global_pks = block_idx[pks]
