@@ -152,3 +152,16 @@
   - Implemented signal morphology scoring that assesses candidates' median prominence scaled to noise, while penalizing highly variable width characteristics, explicitly avoiding rewarding high candidate counts, match to expected beats, or single-value periodicity.
   - Returns a detailed dictionary retaining the selected candidates, best polarity, selection reasons, score margin, and `polarity_ambiguity` flag suitable for downstream QC processing.
 - **Testing:** Implemented `tests/test_step17_polarity.py` directly verifying requirements including matching symmetric sinusoidal traces to `ambiguity=True`, equivalent counts and invariant timestamps between asymmetric original and inverted traces, resilience of clean-but-irregular contraction traces over falsely regular noise, correctly overcoming high-count artifact traps with morphological evaluation, and obeying manual overrides.
+
+### Step 18: Unified Quality Control for v2
+- **Status:** Complete.
+- **Implementation:**
+  - Implemented `evaluate_qc_v2` in a new module `pixel_counter/qc_v2.py`.
+  - The module assesses technical indicators independently of the underlying legacy Excel row count (e.g. validating total observed coverage, sampling frequency and signal clipping).
+  - Integrates detector-specific uncertainties identified during Steps 14–17 (e.g. ambiguous polarities and insufficient reliable seeds directly flag as `REVIEW`).
+  - Added robust checks evaluating potential sensitivity instability by diagnosing counts and timestamps at `±15%` threshold variances.
+  - Formulated a comprehensive wrapper function `analyze_v2_pipeline` in `pixel_counter/analysis.py` successfully chaining together `auto_select_polarity_v2`, `deduplicate_events_v2` and `evaluate_qc_v2`.
+- **Testing:**
+  - Developed `tests/test_qc_v2.py` verifying all specified edge conditions deterministically.
+  - Validated that technically clean signals experiencing genuine but irregular contractions correctly bypass arbitrary rejection algorithms designed around single-metric thresholds (IBI CV).
+  - Assured identical continuous signals correctly maintain consistent QC classifications when simulated against varying structural extraction intervals.
