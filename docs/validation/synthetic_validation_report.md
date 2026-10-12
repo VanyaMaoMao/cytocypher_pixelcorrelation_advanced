@@ -16,13 +16,13 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 
 | Metric | Legacy Pipeline | V2 Pipeline |
 |---|---|---|
-| f1 | 0.0000 | 0.9767 |
-| precision | 0.0000 | 0.9545 |
-| recall | 0.0000 | 1.0000 |
-| abs_count_error | 42 | 2 |
-| tp | 0 | 42 |
-| fp | 0 | 2 |
-| fn | 42 | 0 |
+| f1 | 0.2500 | 0.9767 |
+| precision | 0.2045 | 0.9545 |
+| recall | 0.3214 | 1.0000 |
+| abs_count_error | 18 | 2 |
+| tp | 9 | 42 |
+| fp | 35 | 2 |
+| fn | 19 | 0 |
 
 ## Per-Recording Results
 
@@ -31,7 +31,7 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 
 | Version | F1 | Precision | Recall | TP | FP | FN | Count Error | Hz Error | Polarity Correct | QC |
 |---|---|---|---|---|---|---|---|---|---|---|
-| legacy | 0.0000 | 0.0000 | 0.0000 | 0 | 0 | 9 | -9 | nan | N/A | ERROR/REJECT |
+| legacy | 0.5143 | 0.3462 | 1.0000 | 9 | 17 | 0 | 17 | 1.7000 | N/A | ERROR/REJECT |
 | v2 | 1.0000 | 1.0000 | 1.0000 | 9 | 0 | 0 | 0 | 0.0000 | True | PASS |
 
 ### Recording: synthetic_2hz_inverted
@@ -39,7 +39,7 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 
 | Version | F1 | Precision | Recall | TP | FP | FN | Count Error | Hz Error | Polarity Correct | QC |
 |---|---|---|---|---|---|---|---|---|---|---|
-| legacy | 0.0000 | 0.0000 | 0.0000 | 0 | 0 | 19 | -19 | nan | N/A | ERROR/REJECT |
+| legacy | 0.0000 | 0.0000 | 0.0000 | 0 | 18 | 19 | -1 | -0.1000 | N/A | ERROR/REJECT |
 | v2 | 1.0000 | 1.0000 | 1.0000 | 19 | 0 | 0 | 0 | 0.0000 | True | REVIEW |
 
 ### Recording: synthetic_gap_1hz
@@ -47,7 +47,7 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 
 | Version | F1 | Precision | Recall | TP | FP | FN | Count Error | Hz Error | Polarity Correct | QC |
 |---|---|---|---|---|---|---|---|---|---|---|
-| legacy | 0.0000 | 0.0000 | 0.0000 | 0 | 0 | 4 | -4 | nan | N/A | ERROR/REJECT |
+| legacy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | NOT_EVALUABLE |
 | v2 | 1.0000 | 1.0000 | 1.0000 | 4 | 0 | 0 | 0 | 0.0000 | True | PASS |
 
 ### Recording: synthetic_irregular
@@ -55,5 +55,5 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 
 | Version | F1 | Precision | Recall | TP | FP | FN | Count Error | Hz Error | Polarity Correct | QC |
 |---|---|---|---|---|---|---|---|---|---|---|
-| legacy | 0.0000 | 0.0000 | 0.0000 | 0 | 0 | 10 | -10 | nan | N/A | ERROR/REJECT |
+| legacy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | NOT_EVALUABLE |
 | v2 | 0.9091 | 0.8333 | 1.0000 | 10 | 2 | 0 | 2 | 0.1000 | True | PASS |

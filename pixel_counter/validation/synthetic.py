@@ -1,12 +1,12 @@
 import numpy as np
-import pandas as pd
 from typing import Dict, Any
 
-def generate_synthetic_validation_dataset() -> Dict[str, Any]:
+def generate_synthetic_validation_dataset(seed: int = 42) -> Dict[str, Any]:
     """
     Generates a set of deterministic synthetic recordings with known ground-truth annotations.
     """
     dataset = {}
+    rng = np.random.default_rng(seed)
 
     # 1. Standard 1Hz clean signal
     fs = 250.0
@@ -15,7 +15,7 @@ def generate_synthetic_validation_dataset() -> Dict[str, Any]:
     true_times_1 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
     for c in true_times_1:
         sig1 += 1.0 * np.exp(-0.5 * ((t1 - c) / 0.02) ** 2)
-    sig1 += np.random.normal(0, 0.01, sig1.shape)
+    sig1 += rng.normal(0, 0.01, sig1.shape)
 
     dataset["synthetic_1hz_clean"] = {
         "signal": sig1,
@@ -31,7 +31,7 @@ def generate_synthetic_validation_dataset() -> Dict[str, Any]:
     true_times_2 = np.arange(0.5, 9.6, 0.5)
     for c in true_times_2:
         sig2 -= 1.0 * np.exp(-0.5 * ((t2 - c) / 0.02) ** 2)
-    sig2 += np.random.normal(0, 0.01, sig2.shape)
+    sig2 += rng.normal(0, 0.01, sig2.shape)
 
     dataset["synthetic_2hz_inverted"] = {
         "signal": sig2,
@@ -67,7 +67,7 @@ def generate_synthetic_validation_dataset() -> Dict[str, Any]:
     true_times_4 = [1.0, 1.2, 1.8, 3.5, 4.0, 6.0, 6.1, 8.0, 15.0, 18.0]
     for c in true_times_4:
         sig4 += 1.0 * np.exp(-0.5 * ((t4 - c) / 0.02) ** 2)
-    sig4 += np.random.normal(0, 0.02, sig4.shape)
+    sig4 += rng.normal(0, 0.02, sig4.shape)
 
     dataset["synthetic_irregular"] = {
         "signal": sig4,

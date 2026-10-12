@@ -8,16 +8,16 @@
       "description": "Clean 1Hz positive peaks",
       "legacy": {
         "metrics": {
-          "precision": 0.0,
-          "recall": 0.0,
-          "f1": 0.0,
-          "tp": 0,
-          "fp": 0,
-          "fn": 9,
-          "count_error": -9,
-          "abs_count_error": 9,
-          "hz_error": NaN,
-          "bpm_error": NaN,
+          "precision": 0.34615384615384615,
+          "recall": 1.0,
+          "f1": 0.5142857142857142,
+          "tp": 9,
+          "fp": 17,
+          "fn": 0,
+          "count_error": 17,
+          "abs_count_error": 17,
+          "hz_error": 1.7000000000000002,
+          "bpm_error": 102.00000000000001,
           "is_double_freq": false,
           "is_half_freq": false
         },
@@ -51,12 +51,12 @@
           "recall": 0.0,
           "f1": 0.0,
           "tp": 0,
-          "fp": 0,
+          "fp": 18,
           "fn": 19,
-          "count_error": -19,
-          "abs_count_error": 19,
-          "hz_error": NaN,
-          "bpm_error": NaN,
+          "count_error": -1,
+          "abs_count_error": 1,
+          "hz_error": -0.09999999999999987,
+          "bpm_error": -5.999999999999992,
           "is_double_freq": false,
           "is_half_freq": false
         },
@@ -86,20 +86,20 @@
       "description": "1Hz peaks with large NaN gap in middle",
       "legacy": {
         "metrics": {
-          "precision": 0.0,
-          "recall": 0.0,
-          "f1": 0.0,
-          "tp": 0,
-          "fp": 0,
-          "fn": 4,
-          "count_error": -4,
-          "abs_count_error": 4,
-          "hz_error": NaN,
-          "bpm_error": NaN,
+          "precision": "N/A",
+          "recall": "N/A",
+          "f1": "N/A",
+          "tp": "N/A",
+          "fp": "N/A",
+          "fn": "N/A",
+          "count_error": "N/A",
+          "abs_count_error": "N/A",
+          "hz_error": "N/A",
+          "bpm_error": "N/A",
           "is_double_freq": false,
           "is_half_freq": false
         },
-        "qc_status": "ERROR/REJECT"
+        "qc_status": "NOT_EVALUABLE"
       },
       "v2": {
         "metrics": {
@@ -125,20 +125,20 @@
       "description": "Irregular high-quality peaks",
       "legacy": {
         "metrics": {
-          "precision": 0.0,
-          "recall": 0.0,
-          "f1": 0.0,
-          "tp": 0,
-          "fp": 0,
-          "fn": 10,
-          "count_error": -10,
-          "abs_count_error": 10,
-          "hz_error": NaN,
-          "bpm_error": NaN,
+          "precision": "N/A",
+          "recall": "N/A",
+          "f1": "N/A",
+          "tp": "N/A",
+          "fp": "N/A",
+          "fn": "N/A",
+          "count_error": "N/A",
+          "abs_count_error": "N/A",
+          "hz_error": "N/A",
+          "bpm_error": "N/A",
           "is_double_freq": false,
           "is_half_freq": false
         },
-        "qc_status": "ERROR/REJECT"
+        "qc_status": "NOT_EVALUABLE"
       },
       "v2": {
         "metrics": {
@@ -161,13 +161,13 @@
     }
   },
   "legacy_aggregated": {
-    "tp": 0,
-    "fp": 0,
-    "fn": 42,
-    "precision": 0.0,
-    "recall": 0.0,
-    "f1": 0.0,
-    "abs_count_error": 42
+    "tp": 9,
+    "fp": 35,
+    "fn": 19,
+    "precision": 0.20454545454545456,
+    "recall": 0.32142857142857145,
+    "f1": 0.25000000000000006,
+    "abs_count_error": 18
   },
   "v2_aggregated": {
     "tp": 42,

@@ -34,9 +34,24 @@ def run_synthetic_validation(tolerance_s: float = 0.05, output_dir: str = "docs/
         true_polarity = rec_data["true_polarity"]
 
         # 1. Run legacy pipeline
-        # Need to provide valid mask and dummy seg_meta, orient_meta
-        seg_meta = [(0, len(sig), 1, 0.0, -1)]
-        orient_meta = {"manual_orientation": true_polarity}
+        row_len = int(fs)
+        seg_meta = []
+        for i in range(len(sig) // row_len):
+            s = i * row_len
+            e = s + row_len
+            seg_meta.append((i, s, e, float(i), -1))
+
+        if len(sig) % row_len != 0:
+            s = (len(sig) // row_len) * row_len
+            seg_meta.append((len(seg_meta), s, len(sig), float(s/fs), -1))
+
+        orient_meta = {
+            "manual_orientation": true_polarity,
+            "confidence": 1.0,
+            "up_fraction": 1.0 if true_polarity == 1 else 0.0,
+            "down_fraction": 1.0 if true_polarity == -1 else 0.0,
+            "row_direction_transition_score": 0.0
+        }
 
         df_source = pd.DataFrame({"y 0": sig})
 
@@ -63,13 +78,25 @@ def run_synthetic_validation(tolerance_s: float = 0.05, output_dir: str = "docs/
         legacy_rate_hz = bpm / 60.0 if (not np.isnan(bpm) and legacy_status > 0) else np.nan
         legacy_status_str = "PASS" if legacy_status == 1 else "ERROR/REJECT"
 
+        legacy_evaluable = True
+        if legacy_status == 0 and len(legacy_times) == 0:
+            legacy_status_str = "NOT_EVALUABLE"
+            legacy_evaluable = False
+
         l_metrics = calculate_validation_metrics(
             len(l_tp_idx), len(l_fp_idx), len(l_fn_idx),
             len(legacy_times), len(true_times),
             legacy_rate_hz,
-            len(true_times) / (len(sig)/fs), # Approx true rate
+            len(true_times) / (len(sig)/fs),
             len(sig)/fs
         )
+
+        # Override metrics if not evaluable
+        if not legacy_evaluable:
+            for k in ["precision", "recall", "f1", "hz_error", "bpm_error", "count_error", "abs_count_error"]:
+                l_metrics[k] = "N/A"
+            for k in ["tp", "fp", "fn"]:
+                l_metrics[k] = "N/A"
 
         # 2. Run v2 pipeline
         v2_res = analyze_v2_pipeline(sig, fs, config)
@@ -107,16 +134,31 @@ def run_synthetic_validation(tolerance_s: float = 0.05, output_dir: str = "docs/
         }
 
         # Accumulate totals
-        for totals, met in [(legacy_totals, l_metrics), (v2_totals, v_metrics)]:
-            totals["tp"] += met["tp"]
-            totals["fp"] += met["fp"]
-            totals["fn"] += met["fn"]
-            totals["pred"] += met["tp"] + met["fp"]
-            totals["true"] += len(true_times)
-            totals["abs_count_error"] += met["abs_count_error"]
+        if legacy_evaluable:
+            legacy_totals["tp"] += l_metrics["tp"]
+            legacy_totals["fp"] += l_metrics["fp"]
+            legacy_totals["fn"] += l_metrics["fn"]
+            legacy_totals["pred"] += l_metrics["tp"] + l_metrics["fp"]
+            legacy_totals["true"] += len(true_times)
+            legacy_totals["abs_count_error"] += l_metrics["abs_count_error"]
+
+        v2_totals["tp"] += v_metrics["tp"]
+        v2_totals["fp"] += v_metrics["fp"]
+        v2_totals["fn"] += v_metrics["fn"]
+        v2_totals["pred"] += v_metrics["tp"] + v_metrics["fp"]
+        v2_totals["true"] += len(true_times)
+        v2_totals["abs_count_error"] += v_metrics["abs_count_error"]
 
     # Calculate aggregated metrics
     for totals, key in [(legacy_totals, "legacy_aggregated"), (v2_totals, "v2_aggregated")]:
+        if totals["true"] == 0 and totals["tp"] == 0 and totals["fp"] == 0:
+             results[key] = {
+                "tp": "N/A", "fp": "N/A", "fn": "N/A",
+                "precision": "N/A", "recall": "N/A", "f1": "N/A",
+                "abs_count_error": "N/A"
+             }
+             continue
+
         tp, fp, fn, true_c = totals["tp"], totals["fp"], totals["fn"], totals["true"]
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec = tp / true_c if true_c > 0 else 0.0

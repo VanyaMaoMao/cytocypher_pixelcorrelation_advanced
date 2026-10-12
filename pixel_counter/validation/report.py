@@ -51,9 +51,13 @@ def generate_comparison_report(results: dict, output_path: str):
         for ver in ["legacy", "v2"]:
             v_res = rec_res.get(ver, {})
             metrics = v_res.get("metrics", {})
-            f1 = f"{metrics.get('f1', 0):.4f}"
-            prec = f"{metrics.get('precision', 0):.4f}"
-            rec = f"{metrics.get('recall', 0):.4f}"
+            f1 = metrics.get('f1', 0)
+            f1 = f"{f1:.4f}" if isinstance(f1, float) else f1
+            prec = metrics.get('precision', 0)
+            prec = f"{prec:.4f}" if isinstance(prec, float) else prec
+            rec = metrics.get('recall', 0)
+            rec = f"{rec:.4f}" if isinstance(rec, float) else rec
+
             tp = metrics.get('tp', 0)
             fp = metrics.get('fp', 0)
             fn = metrics.get('fn', 0)
