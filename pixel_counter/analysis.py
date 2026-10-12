@@ -48,10 +48,11 @@ def auto_select_polarity_v2(
 
     if mode == "positive":
         res = detect_events_v2(sig, fs, config, polarity=1)
-        res = deduplicate_events_v2(sig, fs, res, config)
         return {
             "best_result": res,
             "best_polarity": 1,
+            "result_positive": res,
+            "result_negative": None,
             "metadata": {
                 "candidate_tested": ["positive"],
                 "candidate_selected": "positive",
@@ -63,10 +64,11 @@ def auto_select_polarity_v2(
         }
     elif mode == "negative":
         res = detect_events_v2(sig, fs, config, polarity=-1)
-        res = deduplicate_events_v2(sig, fs, res, config)
         return {
             "best_result": res,
             "best_polarity": -1,
+            "result_positive": None,
+            "result_negative": res,
             "metadata": {
                 "candidate_tested": ["negative"],
                 "candidate_selected": "negative",
@@ -80,10 +82,7 @@ def auto_select_polarity_v2(
     # 'auto' mode
     # Evaluate both polarities independently
     res_pos = detect_events_v2(sig, fs, config, polarity=1)
-    res_pos = deduplicate_events_v2(sig, fs, res_pos, config)
-
     res_neg = detect_events_v2(sig, fs, config, polarity=-1)
-    res_neg = deduplicate_events_v2(sig, fs, res_neg, config)
 
     # Evaluate scores based on morphology and noise
     def score_polarity(res: Dict, pol: int) -> float:
@@ -124,12 +123,16 @@ def auto_select_polarity_v2(
         return {
             "best_result": res_pos,
             "best_polarity": 1,
+            "result_positive": res_pos,
+            "result_negative": res_neg,
             "metadata": {
                 "candidate_tested": ["positive", "negative"],
-                "candidate_selected": "positive",
+                "candidate_selected": "none",
                 "candidate_rankings": {"positive": score_pos, "negative": score_neg},
                 "candidate_selection_reason": "both_failed",
                 "polarity_ambiguity": True,
+                "qc_recommendation": "REVIEW",
+                "qc_reason": "both_polarities_failed",
                 "score_margin": 0.0,
             }
         }
@@ -170,6 +173,8 @@ def auto_select_polarity_v2(
     return {
         "best_result": best_res,
         "best_polarity": best_polarity,
+        "result_positive": res_pos,
+        "result_negative": res_neg,
         "metadata": meta
     }
 

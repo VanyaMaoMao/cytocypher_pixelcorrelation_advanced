@@ -148,3 +148,37 @@ def test_incorrect_polarity_more_candidates():
 
     # The negative score should be lower than positive score
     assert result["metadata"]["candidate_rankings"]["positive"] > result["metadata"]["candidate_rankings"]["negative"]
+
+def test_both_results_preserved_in_auto():
+    """Verify both result_positive and result_negative are returned."""
+    fs = 250.0
+    t = np.arange(1000) / fs
+    sig = np.zeros_like(t)
+
+    sig += 1.0 * np.exp(-0.5 * ((t - 2.0) / 0.02) ** 2)
+
+    config = BeatCounterConfig(prom0=0.01, v2_polarity_mode="auto")
+    result = auto_select_polarity_v2(sig, fs, config)
+
+    assert "result_positive" in result
+    assert "result_negative" in result
+    assert result["result_positive"] is not None
+    assert result["result_negative"] is not None
+
+def test_both_polarities_failed():
+    """Verify failure of both polarities triggers REVIEW with correct reason."""
+    fs = 250.0
+    t = np.arange(1000) / fs
+    sig = np.zeros_like(t)
+
+    # Pure noise (no distinct peaks)
+    np.random.seed(42)
+    sig += np.random.normal(0, 0.01, sig.shape)
+
+    config = BeatCounterConfig(prom0=10.0, v2_polarity_mode="auto") # High threshold to force failure
+    result = auto_select_polarity_v2(sig, fs, config)
+
+    assert result["metadata"]["candidate_selected"] == "none"
+    assert result["metadata"]["candidate_selection_reason"] == "both_failed"
+    assert result["metadata"]["qc_recommendation"] == "REVIEW"
+    assert result["metadata"]["qc_reason"] == "both_polarities_failed"
