@@ -30,6 +30,154 @@ from .qc import (
 )
 from .results import AFCEvent, AFCSegmentReviewDecision, AFCSegmentReviewItem, AFCReviewDecision, AFCReviewItem
 
+def auto_select_polarity_v2(
+    sig: np.ndarray,
+    fs: float,
+    config: BeatCounterConfig
+) -> Dict:
+    """
+    Step 17: Automatic polarity selection for the experimental v2 detector.
+    Evaluates both positive and negative polarity through the identical complete v2 pipeline.
+    Compares the two results using scientifically relevant signal morphology, noise characteristics,
+    and candidate quality (without rewarding simply for detecting more peaks, matching stim frequency,
+    or producing a more regular rhythm).
+    Supports explicit 'auto', 'positive', and 'negative' polarity modes.
+    Handles ambiguous polarity explicitly by recording ambiguity and a REVIEW recommendation.
+    """
+    mode = getattr(config, "v2_polarity_mode", "auto").lower()
+
+    if mode == "positive":
+        res = detect_events_v2(sig, fs, config, polarity=1)
+        return {
+            "best_result": res,
+            "best_polarity": 1,
+            "result_positive": res,
+            "result_negative": None,
+            "metadata": {
+                "candidate_tested": ["positive"],
+                "candidate_selected": "positive",
+                "candidate_rankings": {"positive": 1.0},
+                "candidate_selection_reason": "manual_override",
+                "polarity_ambiguity": False,
+                "score_margin": 0.0,
+            }
+        }
+    elif mode == "negative":
+        res = detect_events_v2(sig, fs, config, polarity=-1)
+        return {
+            "best_result": res,
+            "best_polarity": -1,
+            "result_positive": None,
+            "result_negative": res,
+            "metadata": {
+                "candidate_tested": ["negative"],
+                "candidate_selected": "negative",
+                "candidate_rankings": {"negative": 1.0},
+                "candidate_selection_reason": "manual_override",
+                "polarity_ambiguity": False,
+                "score_margin": 0.0,
+            }
+        }
+
+    # 'auto' mode
+    # Evaluate both polarities independently
+    res_pos = detect_events_v2(sig, fs, config, polarity=1)
+    res_neg = detect_events_v2(sig, fs, config, polarity=-1)
+
+    # Evaluate scores based on morphology and noise
+    def score_polarity(res: Dict, pol: int) -> float:
+        # Filter to only PASS candidates
+        if "status" in res and len(res["status"]) > 0:
+            mask = res["status"] == "PASS"
+        else:
+            mask = np.ones(res.get("candidate_index", np.array([])).size, dtype=bool)
+
+        if not np.any(mask):
+            return -np.inf
+
+        proms = res.get("prominence", np.array([]))[mask]
+        widths = res.get("width_s", np.array([]))[mask]
+        amps = res.get("amplitude", np.array([]))[mask]
+
+        # We want to favor robust, distinct morphology relative to baseline.
+        # Score components:
+        # 1. Median Prominence (scaled to typical ranges)
+        med_prom = float(np.median(proms)) if proms.size > 0 else 0.0
+
+        # 2. Width consistency (we penalize highly variable widths which might indicate noise mapping)
+        med_width = float(np.median(widths)) if widths.size > 0 else 1e-9
+        mad_width = float(median_abs_deviation(widths, scale="normal")) if widths.size > 2 else 0.0
+        width_cv = mad_width / med_width if med_width > 0 else 1.0
+
+        # 3. Peak symmetry / robustness vs noise.
+        # We prefer polarities that produce clear distinct peaks, meaning higher median prominence
+        # and more consistent width across the main population.
+        score = med_prom / (1.0 + width_cv)
+        return score
+
+    score_pos = score_polarity(res_pos, 1)
+    score_neg = score_polarity(res_neg, -1)
+
+    # Handle absolute failure
+    if not np.isfinite(score_pos) and not np.isfinite(score_neg):
+        return {
+            "best_result": res_pos,
+            "best_polarity": 1,
+            "result_positive": res_pos,
+            "result_negative": res_neg,
+            "metadata": {
+                "candidate_tested": ["positive", "negative"],
+                "candidate_selected": "none",
+                "candidate_rankings": {"positive": score_pos, "negative": score_neg},
+                "candidate_selection_reason": "both_failed",
+                "polarity_ambiguity": True,
+                "qc_recommendation": "REVIEW",
+                "qc_reason": "both_polarities_failed",
+                "score_margin": 0.0,
+            }
+        }
+
+    best_polarity = 1 if score_pos >= score_neg else -1
+    best_res = res_pos if best_polarity == 1 else res_neg
+
+    # Evaluate ambiguity
+    max_score = max(score_pos, score_neg)
+    min_score = min(score_pos, score_neg)
+
+    ambiguous = False
+    margin = 0.0
+
+    if max_score > 0 and np.isfinite(min_score):
+        margin = (max_score - min_score) / max_score
+        if margin < 0.15:  # Very similar scores -> ambiguous
+            ambiguous = True
+    elif max_score > 0 and not np.isfinite(min_score):
+        margin = 1.0
+        ambiguous = False
+
+    reason = f"auto_selected_{'positive' if best_polarity == 1 else 'negative'}_margin_{margin:.3f}"
+
+    meta = {
+        "candidate_tested": ["positive", "negative"],
+        "candidate_selected": "positive" if best_polarity == 1 else "negative",
+        "candidate_rankings": {"positive": float(score_pos), "negative": float(score_neg)},
+        "candidate_selection_reason": reason,
+        "polarity_ambiguity": ambiguous,
+        "score_margin": float(margin),
+    }
+
+    if ambiguous:
+        meta["qc_recommendation"] = "REVIEW"
+        meta["qc_reason"] = "polarity_ambiguity"
+
+    return {
+        "best_result": best_res,
+        "best_polarity": best_polarity,
+        "result_positive": res_pos,
+        "result_negative": res_neg,
+        "metadata": meta
+    }
+
 def detect_events_v2(
     sig: np.ndarray,
     fs: float,
@@ -2794,7 +2942,7 @@ def _analyze_prebuilt_signal(
     _acc_t("dedup_s", t_dedup)
     main_after_dedup_set = set(int(x) for x in main_peaks.tolist())
 
-    periodicity_score = float(qc_features.get("periodicity_score", 0.0))
+    periodicity_score = float(qc_features.get("periodicity", qc_features.get("periodicity_score", 0.0)))
     corr_med = float(qc_features.get("corr_med", np.nan))
     promoted = recover_missing_main_peaks_in_large_gaps(
         raw_peaks=raw_peaks,
@@ -2997,7 +3145,7 @@ def _analyze_prebuilt_signal(
     q_score = _quality_score(prom_snr, total_main, ibi_cv)
 
     corr_med = float(qc_features.get("corr_med", np.nan))
-    periodicity = float(qc_features.get("periodicity_score", 0.0))
+    periodicity = float(qc_features.get("periodicity", qc_features.get("periodicity_score", 0.0)))
     row_transition = float(qc_features.get("orientation_transition_score", 0.0))
     minor_orient = min(
         float(qc_features.get("orientation_down_fraction", 0.0)),

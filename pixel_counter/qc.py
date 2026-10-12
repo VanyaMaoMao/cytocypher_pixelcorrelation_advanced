@@ -263,7 +263,7 @@ def _evaluate_mixed_orientation_rule(features: Dict, config: BeatCounterConfig) 
     up = float(features.get("orientation_up_fraction", np.nan))
     minor = min(down, up) if np.isfinite(down) and np.isfinite(up) else 0.0
     transition = float(features.get("orientation_transition_score", 0.0))
-    periodicity = float(features.get("periodicity_score", 0.0))
+    periodicity = float(features.get("periodicity", features.get("periodicity_score", 0.0)))
     corr = float(features.get("corr_med", np.nan))
     mixed_flip_detected = bool(features.get("mixed_direction_flip_detected", False))
 
@@ -327,7 +327,7 @@ def evaluate_segment_qc_with_features(features: Dict, n_vertical_artifacts: int,
     f = dict(features or {})
     n_rows = int(features.get("n_rows", 0))
     corr = float(features.get("corr_med", np.nan))
-    periodicity = float(features.get("periodicity_score", 0.0))
+    periodicity = float(features.get("periodicity", features.get("periodicity_score", 0.0)))
     snr = float(features.get("snr", 0.0))
     spike = float(features.get("spike_fraction", 0.0))
     if n_rows < int(config.qc_min_rows):

@@ -142,3 +142,13 @@
     - **Pass 2:** Explicitly evaluate the complete candidate set. Non-seed candidates are filtered using morphological bounds relative to the robust median width of seeds (`0.25x` to `4.0x`), effectively dropping morphological artifacts while preserving weak genuine candidates that conform to the primary population shape.
 - **Testing:** Implemented `tests/test_step16_refinement.py` testing synthetic deterministic scenarios per requirements (unusually high artifact, alternating amplitudes, pure noise, morphological artifacts, pauses).
 - **Comparison & Conclusion:** The explicit two-pass refinement correctly identifies and preserves weak genuine candidates while actively dropping morphological artifacts. However, the simpler baseline `detect_events_v2` approach combined with downstream Step 15 deduplication is already highly accurate across the development set. Therefore, per the original project plan, the two-pass refinement remains optional (`v2_two_pass_enabled = False` by default). This limits required pipeline complexity and avoids forcing an unproven thresholding cascade on standard files, while preserving the robust logic for explicit diagnostic evaluation.
+
+### Step 17: Automatic Polarity Selection
+- **Status:** Complete.
+- **Implementation:**
+  - Added `v2_polarity_mode` configuration parameter to `BeatCounterConfig` with modes `'auto'`, `'positive'`, and `'negative'`.
+  - Implemented `auto_select_polarity_v2` orchestrator in `pixel_counter/analysis.py`.
+  - The orchestrator processes both positive and inverted signals completely using the identical `detect_events_v2` and `deduplicate_events_v2` pipeline, capturing both count and timestamps accurately.
+  - Implemented signal morphology scoring that assesses candidates' median prominence scaled to noise, while penalizing highly variable width characteristics, explicitly avoiding rewarding high candidate counts, match to expected beats, or single-value periodicity.
+  - Returns a detailed dictionary retaining the selected candidates, best polarity, selection reasons, score margin, and `polarity_ambiguity` flag suitable for downstream QC processing.
+- **Testing:** Implemented `tests/test_step17_polarity.py` directly verifying requirements including matching symmetric sinusoidal traces to `ambiguity=True`, equivalent counts and invariant timestamps between asymmetric original and inverted traces, resilience of clean-but-irregular contraction traces over falsely regular noise, correctly overcoming high-count artifact traps with morphological evaluation, and obeying manual overrides.

@@ -116,6 +116,7 @@ class BeatCounterConfig:
 
     v2_two_pass_enabled: bool = False
     v2_seed_prom_mad_mult: float = 6.0
+    v2_polarity_mode: str = "auto"  # 'auto', 'positive', 'negative'
 
     main_gap_fill_enabled: bool = True
     main_gap_fill_periodicity_min: float = 0.75
