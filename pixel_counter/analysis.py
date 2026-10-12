@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+from .qc_v2 import evaluate_qc_v2
 
 import logging
 import os
@@ -29,6 +30,35 @@ from .qc import (
     suppress_vertical_line_artifacts,
 )
 from .results import AFCEvent, AFCSegmentReviewDecision, AFCSegmentReviewItem, AFCReviewDecision, AFCReviewItem
+
+
+def analyze_v2_pipeline(
+    sig: np.ndarray,
+    fs: float,
+    config: BeatCounterConfig,
+) -> Dict:
+    """
+    Complete v2 pipeline wrapper that executes:
+    1. Polarity selection & detection (auto_select_polarity_v2)
+    2. QC evaluation (evaluate_qc_v2)
+    """
+    polarity_result = auto_select_polarity_v2(sig, fs, config)
+    candidates = polarity_result["best_result"]
+    meta = polarity_result["metadata"]
+
+    # Evaluate QC
+    status, reason, qc_meta = evaluate_qc_v2(sig, fs, candidates, meta, config)
+
+    # Update meta with QC results
+    meta["qc_status"] = status
+    meta["qc_reason"] = reason
+    meta.update(qc_meta)
+
+    return {
+        "candidates": candidates,
+        "metadata": meta,
+        "polarity_result": polarity_result
+    }
 
 def auto_select_polarity_v2(
     sig: np.ndarray,
