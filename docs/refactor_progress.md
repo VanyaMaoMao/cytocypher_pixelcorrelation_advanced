@@ -131,3 +131,14 @@
 - Reverted all attempted modifications to the legacy `deduplicate_main_candidates` framework, fully complying with instructions protecting existing step logic inside `_analyze_prebuilt_signal`, `build_events_dataframe`, and metrics schemas.
 - Ran robust integration test schemas encompassing shoulder peaks, deep valley exclusions, sub-sampling arrays, missing artifacts and 10+ Hz fast-beat rhythms validating accuracy thresholds and suppression decisions safely against synthetics in `test_detect_events_v2.py`.
 - Implemented a protective condition verifying that neighboring candidate regions across actual `NaN` boundaries implicitly fail physical group merging configurations to explicitly prohibit temporal artifact collisions connecting disparate signal blocks.
+
+
+### Step 16: Two-Pass Candidate Refinement
+- **Status:** Complete.
+- **Implementation:**
+  - Added `v2_two_pass_enabled` and `v2_seed_prom_mad_mult` configuration parameters to `BeatCounterConfig`.
+  - Updated `detect_events_v2` in `pixel_counter/analysis.py` to implement a true two-pass logic:
+    - **Pass 1:** Calculate robust local noise statistics (`noise_mad`) to identify high-quality seeds (`is_seed`) and derive population `uncertainty` (e.g. if MAD > 30% of median).
+    - **Pass 2:** Explicitly evaluate the complete candidate set. Non-seed candidates are filtered using morphological bounds relative to the robust median width of seeds (`0.25x` to `4.0x`), effectively dropping morphological artifacts while preserving weak genuine candidates that conform to the primary population shape.
+- **Testing:** Implemented `tests/test_step16_refinement.py` testing synthetic deterministic scenarios per requirements (unusually high artifact, alternating amplitudes, pure noise, morphological artifacts, pauses).
+- **Comparison & Conclusion:** The explicit two-pass refinement correctly identifies and preserves weak genuine candidates while actively dropping morphological artifacts. However, the simpler baseline `detect_events_v2` approach combined with downstream Step 15 deduplication is already highly accurate across the development set. Therefore, per the original project plan, the two-pass refinement remains optional (`v2_two_pass_enabled = False` by default). This limits required pipeline complexity and avoids forcing an unproven thresholding cascade on standard files, while preserving the robust logic for explicit diagnostic evaluation.
