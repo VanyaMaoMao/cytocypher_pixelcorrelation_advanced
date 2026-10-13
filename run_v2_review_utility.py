@@ -50,6 +50,32 @@ def process_workbook(file_path: str):
 
         candidates = v2_res["candidates"]
 
+        c_times = (candidates.get("time_s", np.array([])) + t0).tolist()
+        c_amps = candidates.get("amplitude", np.array([])).tolist()
+
+        # If status exists, use it. Otherwise, default to PASS for all valid candidates.
+        if "status" in candidates and len(candidates["status"]) == len(c_times):
+            c_status = candidates["status"].tolist()
+        else:
+            c_status = ["PASS"] * len(c_times)
+
+        # Recover suppressed candidates from dedup_audit
+        audit = candidates.get("dedup_audit", [])
+        for item in audit:
+            suppressed_idx = item.get("suppressed_id", -1)
+            if suppressed_idx >= 0 and suppressed_idx < len(sig_corr):
+                time_val = (suppressed_idx / fs) + t0
+                amp_val = sig_corr[suppressed_idx]
+                c_times.append(float(time_val))
+                c_amps.append(float(amp_val))
+                c_status.append("REJECT")
+
+        candidate_dict = {
+            "time_s": c_times,
+            "amplitude": c_amps,
+            "status": c_status
+        }
+
         # 2. PixelIntensity (optional)
         int_sheet = corr_sheet.replace("PixelCorrelation", "PixelIntensity")
         sig_int = []
@@ -88,11 +114,7 @@ def process_workbook(file_path: str):
             "sig_cal_b64": b64_encode_array(sig_cal) if len(sig_cal) > 0 else None,
 
             # Detected events
-            "candidates": {
-                "time_s": candidates.get("time_s", np.array([])).tolist(),
-                "amplitude": candidates.get("amplitude", np.array([])).tolist(),
-                "status": candidates.get("status", np.array([])).tolist()
-            }
+            "candidates": candidate_dict
         }
         segments_data.append(seg_data)
 
@@ -106,7 +128,7 @@ def generate_html(segments_data, source_workbook, out_path):
 <head>
     <meta charset="utf-8">
     <title>Cytocypher Step 19 - Real-data Review</title>
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script>__PLOTLY_JS__</script>
     <style>
         body { font-family: sans-serif; margin: 20px; }
         .controls { display: flex; gap: 20px; margin-bottom: 20px; align-items: center; flex-wrap: wrap;}
@@ -128,6 +150,9 @@ def generate_html(segments_data, source_workbook, out_path):
         <label>Segment:
             <select id="segment_select"></select>
         </label>
+        <label style="background:#eee; padding:5px; border-radius:3px;">
+            <input type="checkbox" id="chk_reviewed"> Mark Segment as Reviewed
+        </label>
         <button id="btn_save">Save Annotations (CSV)</button>
         <div style="flex-grow: 1;"></div>
         <div>
@@ -146,6 +171,7 @@ def generate_html(segments_data, source_workbook, out_path):
                     <th>Segment</th>
                     <th>Sample ID</th>
                     <th>QC Status</th>
+                    <th>Reviewed</th>
                     <th>Pass (Auto)</th>
                     <th>Manual Additions</th>
                     <th>Rejected</th>
@@ -161,9 +187,11 @@ def generate_html(segments_data, source_workbook, out_path):
 
         let currentSegIdx = 0;
         let annotations = {}; // segIdx -> { time_s, confidence, added, rejected, original_status }
+        let segmentReviewed = {};
 
         // Initialize annotations state
         segments_data.forEach((seg, idx) => {
+            segmentReviewed[idx] = false;
             annotations[idx] = [];
             const cands = seg.candidates;
             for(let i=0; i<cands.time_s.length; i++) {
@@ -201,6 +229,11 @@ def generate_html(segments_data, source_workbook, out_path):
                 renderPlot();
             });
 
+            document.getElementById("chk_reviewed").addEventListener("change", (e) => {
+                segmentReviewed[currentSegIdx] = e.target.checked;
+                updateSummaryTable();
+            });
+
             document.getElementById("source_name").innerText = source_workbook;
 
             document.getElementById("btn_save").addEventListener("click", saveAnnotations);
@@ -226,6 +259,7 @@ def generate_html(segments_data, source_workbook, out_path):
                     <td>${seg.sheet_name}</td>
                     <td>${seg.sample_id}</td>
                     <td>${seg.qc_status}</td>
+                    <td>${segmentReviewed[idx] ? '✅ Yes' : '❌ No'}</td>
                     <td>${passCount}</td>
                     <td>${addedCount}</td>
                     <td>${rejectedCount}</td>
@@ -236,6 +270,7 @@ def generate_html(segments_data, source_workbook, out_path):
 
         function renderPlot() {
             const seg = segments_data[currentSegIdx];
+            document.getElementById("chk_reviewed").checked = segmentReviewed[currentSegIdx];
             document.getElementById("segment_info").innerText = `Sample ID: ${seg.sample_id} | Length: ${seg.length} pts | fs: ${seg.fs} Hz`;
 
             const sig_corr = decodeFloat32Array(seg.sig_corr_b64);
@@ -371,12 +406,23 @@ def generate_html(segments_data, source_workbook, out_path):
         }
 
         function saveAnnotations() {
+            let anyReviewed = false;
+            for(let i=0; i<segments_data.length; i++) {
+                if (segmentReviewed[i]) anyReviewed = true;
+            }
+            if (!anyReviewed) {
+                alert("No segments have been marked as Reviewed. Cannot export.");
+                return;
+            }
+
             const annotatorId = prompt("Enter annotator initials (e.g., JD):", "XX");
             if (!annotatorId) return;
 
             let csvContent = "source_workbook,sheet_name,sample_id,time_s,confidence,annotator_id\n";
 
             segments_data.forEach((seg, idx) => {
+                if (!segmentReviewed[idx]) return; // Skip unreviewed
+
                 const anns = annotations[idx];
                 anns.forEach(ann => {
                     if (ann.status === "PASS" || ann.status === "REVIEW") {
@@ -408,6 +454,18 @@ def generate_html(segments_data, source_workbook, out_path):
     # Inject data
     html = html_template.replace("__DATA__", json.dumps(segments_data))
     html = html.replace("__SOURCE__", source_workbook)
+
+    # Download Plotly JS if needed (or fallback to CDN if no internet)
+    try:
+        import urllib.request
+        print("Downloading Plotly.js to embed it for offline use...")
+        with urllib.request.urlopen("https://cdn.plot.ly/plotly-2.27.0.min.js", timeout=10) as response:
+            plotly_js = response.read().decode('utf-8')
+            html = html.replace("__PLOTLY_JS__", plotly_js)
+    except Exception as e:
+        print(f"Failed to download Plotly.js ({e}), falling back to CDN.")
+        html = html.replace("<script>__PLOTLY_JS__</script>", '<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>')
+
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
