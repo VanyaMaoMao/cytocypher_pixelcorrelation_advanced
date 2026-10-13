@@ -455,7 +455,7 @@ def generate_html(segments_data, source_workbook, out_path):
     html = html_template.replace("__DATA__", json.dumps(segments_data))
     html = html.replace("__SOURCE__", source_workbook)
 
-    # Download Plotly JS if needed (or fallback to CDN if no internet)
+    # Download Plotly JS to embed it for strictly offline use
     try:
         import urllib.request
         print("Downloading Plotly.js to embed it for offline use...")
@@ -463,8 +463,7 @@ def generate_html(segments_data, source_workbook, out_path):
             plotly_js = response.read().decode('utf-8')
             html = html.replace("__PLOTLY_JS__", plotly_js)
     except Exception as e:
-        print(f"Failed to download Plotly.js ({e}), falling back to CDN.")
-        html = html.replace("<script>__PLOTLY_JS__</script>", '<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>')
+        raise RuntimeError(f"Failed to download Plotly.js ({e}). Offline generation requires a successful download. Please ensure you have internet access for this initial generation step.") from e
 
 
     with open(out_path, "w", encoding="utf-8") as f:
