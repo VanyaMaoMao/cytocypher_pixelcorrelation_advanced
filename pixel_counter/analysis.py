@@ -116,7 +116,6 @@ def auto_select_polarity_v2(
 
     # Evaluate scores based on morphology and noise
     def score_polarity(res: Dict, pol: int) -> float:
-        # Filter to only PASS candidates
         if "status" in res and len(res["status"]) > 0:
             mask = res["status"] == "PASS"
         else:
@@ -129,20 +128,64 @@ def auto_select_polarity_v2(
         widths = res.get("width_s", np.array([]))[mask]
         amps = res.get("amplitude", np.array([]))[mask]
 
-        # We want to favor robust, distinct morphology relative to baseline.
-        # Score components:
-        # 1. Median Prominence (scaled to typical ranges)
-        med_prom = float(np.median(proms)) if proms.size > 0 else 0.0
+        if proms.size == 0:
+            return -np.inf
 
-        # 2. Width consistency (we penalize highly variable widths which might indicate noise mapping)
+        sig_work = np.asarray(sig, dtype=float)
+        valid = sig_work[np.isfinite(sig_work)]
+        if valid.size == 0:
+            return -np.inf
+
+        p5 = float(np.percentile(valid, 5))
+        p50 = float(np.percentile(valid, 50))
+        p95 = float(np.percentile(valid, 95))
+        total_excursion = p95 - p5
+        if total_excursion <= 0:
+            return -np.inf
+
+        # 1. Baseline resting-state occupancy
+        # For a physiologically correct orientation, the signal spends most time in the relaxed state.
+        # Since valid is the UN-flipped signal, the relaxed state is either at the bottom (pol=1) or top (pol=-1).
+        dist_to_rest = p50 - p5 if pol > 0 else p95 - p50
+        dist_to_peak = p95 - p50 if pol > 0 else p50 - p5
+
+        # We penalize polarities where the median is very close to the assumed peak.
+        baseline_skew = dist_to_peak / max(dist_to_rest, 1e-12)
+        skew_factor = np.clip(baseline_skew, 0.25, 4.0)
+
+        # 2. Peak Quality Metrics
+        med_prom = float(np.median(proms))
         med_width = float(np.median(widths)) if widths.size > 0 else 1e-9
         mad_width = float(median_abs_deviation(widths, scale="normal")) if widths.size > 2 else 0.0
         width_cv = mad_width / med_width if med_width > 0 else 1.0
 
-        # 3. Peak symmetry / robustness vs noise.
-        # We prefer polarities that produce clear distinct peaks, meaning higher median prominence
-        # and more consistent width across the main population.
-        score = med_prom / (1.0 + width_cv)
+        # CytoCypher genuine peaks are narrower than resting plateaus.
+        # If the median width is very large (>0.3s), it's highly likely to be the inverted relaxation phase.
+        width_penalty = np.clip(med_width / 0.15, 0.5, 5.0)
+
+        # 3. Amplitude consistency
+        resting_amp = p5 if pol > 0 else p95
+        med_amp = float(np.median(amps))
+        amp_excursion = abs(med_amp - resting_amp)
+        amp_fraction = np.clip(amp_excursion / max(total_excursion, 1e-12), 0.1, 1.0)
+
+        # 4. SNR
+        d = np.diff(valid)
+        noise_mad = max(float(median_abs_deviation(d, scale="normal")), 1e-12) if d.size else 1e-12
+        prom_snr = med_prom / noise_mad
+        snr_factor = np.clip(np.log1p(prom_snr), 0.5, 10.0)
+
+        # 5. Prominence fraction
+        # Use p90 prominence to ensure we capture the strongest actual contractions, not just noise.
+        p90_prom = float(np.percentile(proms, 90))
+        norm_p90 = p90_prom / max(total_excursion, 1e-12)
+        norm_med = med_prom / max(total_excursion, 1e-12)
+
+        prom_factor = np.power(norm_p90, 2.0) * np.power(norm_med, 0.5)
+        if norm_p90 < 0.25:
+            prom_factor *= 0.01
+
+        score = (prom_factor * snr_factor * skew_factor * amp_fraction) / (width_penalty * (1.0 + width_cv))
         return score
 
     score_pos = score_polarity(res_pos, 1)
@@ -179,7 +222,7 @@ def auto_select_polarity_v2(
 
     if max_score > 0 and np.isfinite(min_score):
         margin = (max_score - min_score) / max_score
-        if margin < 0.15:  # Very similar scores -> ambiguous
+        if margin < 0.35:  # Changed threshold: score ratio is more pronounced now, so 35% margin is a safe threshold for ambiguity given the non-linear transformations
             ambiguous = True
     elif max_score > 0 and not np.isfinite(min_score):
         margin = 1.0
@@ -315,17 +358,36 @@ def detect_events_v2(
         )
 
         if pks_proc.size > 0:
-            # Local search to find the true peak on the raw signal in a tiny window
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # Use FWHM bounds on the processed signal to define the morphological search window
+                # for the dominant extremum on the raw signal.
+                _, _, left_ips, right_ips = peak_widths(processed_sig, pks_proc, rel_height=0.5)
+
             refined_pks = []
-            for pk in pks_proc:
-                l = max(0, pk - 2)
-                r = min(block_sig.size, pk + 3)
-                best_pk = l + int(np.argmax(block_sig[l:r]))
-                refined_pks.append(best_pk)
+            for i, pk in enumerate(pks_proc):
+                # Constrain search window to avoid jumping to neighboring contractions
+                left_bound = 0 if i == 0 else int(np.floor((pks_proc[i-1] + pk) / 2))
+                right_bound = block_sig.size if i == pks_proc.size - 1 else int(np.ceil((pk + pks_proc[i+1]) / 2))
+
+                l_ip = int(np.floor(left_ips[i]))
+                r_ip = int(np.ceil(right_ips[i]))
+
+                # Add a reasonable buffer (e.g., 50ms) to accommodate filtering shifts,
+                # but strictly bounded by neighboring peaks.
+                buffer = max(5, int(0.05 * fs))
+                l = max(left_bound, l_ip - buffer)
+                r = min(right_bound, r_ip + buffer + 1)
+
+                if r > l:
+                    best_pk = l + int(np.argmax(block_sig[l:r]))
+                    refined_pks.append(best_pk)
+                else:
+                    refined_pks.append(pk)
 
             pks = np.unique(refined_pks)
 
-            import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 # Recalculate properties on the raw block to get true raw amplitudes/prominences
