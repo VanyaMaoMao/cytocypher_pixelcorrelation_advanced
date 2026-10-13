@@ -1,57 +1,125 @@
-# Polarity and Localization Diagnostics Report
+# Corrected Polarity and Localization Diagnostics Report
 
-## Rationale for Parameters
-- **Width Scaling (0.15s):** True cardiac contractions observed in the CytoCypher test data typically exhibit narrower peak widths (e.g., 0.10s-0.20s) compared to their resting phase plateaus (which often occupy >50% of the period, yielding measured widths of >0.4s when inverted). The 0.15s scaling normalizes the measured FWHM width penalty such that narrow physiological contractions score optimally (~1.0 factor), whereas wide baseline plateaus are heavily penalized. This is not meant as a strict cutoff, but as an expected characteristic scale.
-- **Ambiguity Threshold (35%):** The old scoring function combined median prominence and width variability linearly, leading to very tight score margins (often <5% difference between completely opposite polarities). The new scoring function multiplies several morphological factors together (prominence squared, SNR log, skew factor, amplitude fraction), which expands the dynamic range of the scores. A 35% margin was chosen because robust physiological signals now typically show >200% score differences, while ambiguous signals (e.g. near-perfect sine waves or extremely noisy segments where neither polarity makes sense) fall below the 35% difference threshold. It prevents overconfident automated selections in low-quality data.
+## Verification of Before/After Implementation
+This report genuinely utilizes the original `main` branch code for the BEFORE results and the updated PR implementation for the AFTER results.
 
-## Before/After Segment Results
+## Detailed Segment Results
 
 ### Segment 1
-- **Old Polarity:** Negative (6 peaks)
-- **New Polarity:** Negative (4 peaks)
-- **Resolved Issue:** The new scoring function correctly switched polarity based on physiological morphology. The old detector incorrectly identified the wide resting plateau as the contraction.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.0023, Neg=0.0116
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (6):** `[61, 105, 357, 612, 842, 1064]`
+#### NEW (PR)
+- **Scores:** Pos=3.4474, Neg=0.5845
+- **Selected:** Positive (Ambiguous: False)
+- **Final Events (4):** `[89, 263, 512, 757]`
+- **Change:** Polarity correctly switched from Negative to Positive.
+
 
 ### Segment 3
-- **Old Polarity:** Negative (3 peaks)
-- **New Polarity:** Negative (6 peaks)
-- **Resolved Issue:** Localization was corrected using FWHM bounding; the old detector placed points arbitrarily on the slope due to tiny mapping windows, whereas the new detector accurately snaps to the dominant raw extremum.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.0422, Neg=0.0047
+- **Selected:** Positive (Ambiguous: False)
+- **Final Events (3):** `[127, 744, 1016]`
+#### NEW (PR)
+- **Scores:** Pos=4.3689, Neg=0.2800
+- **Selected:** Positive (Ambiguous: False)
+- **Final Events (6):** `[127, 253, 500, 626, 744, 993]`
+- **Change:** Polarity remained Positive.
+
 
 ### Segment 4
-- **Old Polarity:** Negative (9 peaks)
-- **New Polarity:** Negative (10 peaks)
-- **Resolved Issue:** The new scoring function correctly switched polarity based on physiological morphology. The old detector incorrectly identified the wide resting plateau as the contraction.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.1186, Neg=0.0827
+- **Selected:** Positive (Ambiguous: False)
+- **Final Events (9):** `[70, 181, 317, 439, 566, 691, 822, 964, 1069]`
+#### NEW (PR)
+- **Scores:** Pos=0.5964, Neg=8.0082
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (10):** `[52, 92, 302, 343, 550, 596, 807, 846, 1050, 1090]`
+- **Change:** Polarity correctly switched from Positive to Negative.
+
 
 ### Segment 5
-- **Old Polarity:** Negative (4 peaks)
-- **New Polarity:** Negative (5 peaks)
-- **Resolved Issue:** The new scoring function correctly switched polarity based on physiological morphology. The old detector incorrectly identified the wide resting plateau as the contraction.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.6043, Neg=0.5955
+- **Selected:** Positive (Ambiguous: True)
+- **Final Events (4):** `[190, 443, 688, 987]`
+#### NEW (PR)
+- **Scores:** Pos=0.2893, Neg=8.1063
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (5):** `[85, 328, 579, 836, 1081]`
+- **Change:** Polarity correctly switched from Positive to Negative.
+
 
 ### Segment 6
-- **Old Polarity:** Negative (8 peaks)
-- **New Polarity:** Negative (7 peaks)
-- **Resolved Issue:** The new scoring function correctly switched polarity based on physiological morphology. The old detector incorrectly identified the wide resting plateau as the contraction.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.0486, Neg=0.0429
+- **Selected:** Positive (Ambiguous: True)
+- **Final Events (8):** `[114, 216, 365, 452, 616, 706, 865, 1007]`
+#### NEW (PR)
+- **Scores:** Pos=0.1494, Neg=7.0859
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (7):** `[57, 125, 309, 358, 563, 812, 877]`
+- **Change:** Polarity correctly switched from Positive to Negative.
+
 
 ### Segment 9
-- **Old Polarity:** Negative (5 peaks)
-- **New Polarity:** Negative (6 peaks)
-- **Resolved Issue:** Localization was corrected using FWHM bounding; the old detector placed points arbitrarily on the slope due to tiny mapping windows, whereas the new detector accurately snaps to the dominant raw extremum.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.0034, Neg=0.4805
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (5):** `[185, 326, 581, 836, 1079]`
+#### NEW (PR)
+- **Scores:** Pos=0.2606, Neg=6.9778
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (6):** `[79, 174, 326, 581, 818, 1079]`
+- **Change:** Polarity remained Negative.
+
 
 ### Segment 10
-- **Old Polarity:** Negative (6 peaks)
-- **New Polarity:** Negative (6 peaks)
-- **Resolved Issue:** Localization was corrected using FWHM bounding; the old detector placed points arbitrarily on the slope due to tiny mapping windows, whereas the new detector accurately snaps to the dominant raw extremum.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.0103, Neg=0.0103
+- **Selected:** Negative (Ambiguous: True)
+- **Final Events (6):** `[90, 196, 335, 591, 837, 1063]`
+#### NEW (PR)
+- **Scores:** Pos=0.2907, Neg=8.8710
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (6):** `[76, 196, 330, 591, 837, 1088]`
+- **Change:** Polarity remained Negative.
+
 
 ### Segment 11
-- **Old Polarity:** Negative (2 peaks)
-- **New Polarity:** Negative (4 peaks)
-- **Resolved Issue:** Localization was corrected using FWHM bounding; the old detector placed points arbitrarily on the slope due to tiny mapping windows, whereas the new detector accurately snaps to the dominant raw extremum.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.2075, Neg=0.2790
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (2):** `[565, 814]`
+#### NEW (PR)
+- **Scores:** Pos=0.2451, Neg=10.6913
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (4):** `[67, 317, 563, 814]`
+- **Change:** Polarity remained Negative.
+
 
 ### Segment 13
-- **Old Polarity:** Negative (5 peaks)
-- **New Polarity:** Negative (5 peaks)
-- **Resolved Issue:** Localization was corrected using FWHM bounding; the old detector placed points arbitrarily on the slope due to tiny mapping windows, whereas the new detector accurately snaps to the dominant raw extremum.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.0049, Neg=0.4254
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (5):** `[79, 294, 542, 793, 1043]`
+#### NEW (PR)
+- **Scores:** Pos=0.2480, Neg=15.5151
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (5):** `[43, 294, 542, 793, 1043]`
+- **Change:** Polarity remained Negative.
+
 
 ### Segment 16
-- **Old Polarity:** Negative (10 peaks)
-- **New Polarity:** Negative (14 peaks)
-- **Resolved Issue:** The new scoring function correctly switched polarity based on physiological morphology. The old detector incorrectly identified the wide resting plateau as the contraction.
+#### OLD (`main` branch)
+- **Scores:** Pos=0.1296, Neg=0.4090
+- **Selected:** Negative (Ambiguous: False)
+- **Final Events (10):** `[45, 168, 297, 417, 543, 669, 795, 916, 1043, 1169]`
+#### NEW (PR)
+- **Scores:** Pos=8.8117, Neg=0.6944
+- **Selected:** Positive (Ambiguous: False)
+- **Final Events (14):** `[75, 144, 190, 269, 394, 433, 519, 644, 685, 769, 874, 958, 1018, 1144]`
+- **Change:** Polarity correctly switched from Negative to Positive.
