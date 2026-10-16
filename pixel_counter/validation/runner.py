@@ -13,14 +13,13 @@ def run_synthetic_validation(tolerance_s: float = 0.05, output_dir: str = "docs/
     dataset = generate_synthetic_validation_dataset()
 
     config = BeatCounterConfig(
-        v2_polarity_mode="auto",
-        v2_two_pass_enabled=False
+        v2_polarity_mode="auto"
     )
 
     results = {
         "is_synthetic": True,
         "tolerance_s": tolerance_s,
-        "v2_config": "auto, no_two_pass",
+        "v2_config": "auto polarity, default strictness (alpha=0.5, rho=0.5, snr=8)",
         "recordings": {}
     }
 
@@ -105,7 +104,7 @@ def run_synthetic_validation(tolerance_s: float = 0.05, output_dir: str = "docs/
         v_tp_idx, v_fp_idx, v_fn_idx = match_events_one_to_one(v2_times, true_times, tolerance_s)
 
         v2_count = len(v2_times)
-        v2_rate_hz = v2_count / (len(sig)/fs) if v2_res["metadata"].get("qc_status") in ["PASS", "REVIEW"] else np.nan
+        v2_rate_hz = v2_count / (len(sig)/fs) if v2_res["metadata"].get("qc_status") == "PASS" else np.nan
 
         v_metrics = calculate_validation_metrics(
             len(v_tp_idx), len(v_fp_idx), len(v_fn_idx),

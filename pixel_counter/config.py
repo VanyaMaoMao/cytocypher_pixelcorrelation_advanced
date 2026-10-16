@@ -114,9 +114,20 @@ class BeatCounterConfig:
 
     use_narrow_retry: bool = True
 
-    v2_two_pass_enabled: bool = False
-    v2_seed_prom_mad_mult: float = 6.0
+    # --- Experimental v2 detector (see docs/v2_detector_report.md) ---------------------------
+    # Polarity: 'auto' = decided once from the ORIGINAL raw waveform; 'positive'/'negative' =
+    # manual override of the raw polarity (+1: contractions already upward, -1: downward).
     v2_polarity_mode: str = "auto"  # 'auto', 'positive', 'negative'
+    # Calcium-assisted polarity: False = default PixelCorrelation-only; True = optional RatioMetricCalcium ECC timing
+    v2_use_calcium_polarity: bool = False
+    # Strictness controls (all dimensionless):
+    #  alpha: a contraction is "major" if its height is >= alpha * typical major height.
+    v2_min_rel_amplitude: float = 0.50
+    #  rho: two maxima are separate mechanical cycles only if the waveform recovers >= rho of
+    #       the lower maximum's height between them.
+    v2_min_rel_recovery: float = 0.50
+    #  absolute floor: height >= v2_min_snr * noise sigma (guards recordings without contractions).
+    v2_min_snr: float = 8.0
 
     main_gap_fill_enabled: bool = True
     main_gap_fill_periodicity_min: float = 0.75

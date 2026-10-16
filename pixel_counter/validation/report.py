@@ -73,10 +73,10 @@ def generate_comparison_report(results: dict, output_path: str):
         report_md += "\n"
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(report_md)
 
     # Write JSON as well for programmatic access
     json_path = output_path.replace('.md', '.json')
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
