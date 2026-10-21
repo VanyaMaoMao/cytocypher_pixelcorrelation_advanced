@@ -57,15 +57,36 @@ def valid_blocks(x: np.ndarray, min_len: int = 1) -> List[Tuple[int, int]]:
 
 
 def estimate_noise_sigma(x: np.ndarray) -> float:
-    """White-noise sigma from the MAD of first differences (insensitive to slow waveform)."""
+    """White-noise sigma from the MAD of first differences (insensitive to slow waveform).
+
+    When the waveform is heavily quantized (e.g. exported at 0.001 resolution so >=45 % of
+    first differences are ~0), the 50th percentile (MAD) collapses to 0 or to the tiny
+    per-sample slope of the smoothed baseline.  In that regime we fall back to the 75th/85th
+    normal-order-statistic scale and half the empirical quantization step.
+    """
     parts = []
     for s, e in valid_blocks(x, 3):
         parts.append(np.diff(x[s:e]))
     if not parts:
         return float("nan")
     d = np.concatenate(parts)
-    mad = np.median(np.abs(d - np.median(d)))
-    return float(1.4826 * mad / np.sqrt(2.0))
+    med = float(np.median(d))
+    ad = np.abs(d - med)
+    mad = float(np.median(ad))
+    sigma_50 = float(1.4826 * mad / np.sqrt(2.0))
+
+    zero_like_frac = float(np.mean(ad <= 5e-5))
+    if zero_like_frac >= 0.45:
+        p75 = float(np.percentile(ad, 75.0))
+        p85 = float(np.percentile(ad, 85.0))
+        sigma_75 = p75 / (1.15035 * np.sqrt(2.0))
+        sigma_85 = p85 / (1.43953 * np.sqrt(2.0))
+        nz = ad[ad > 1e-4]
+        q_step = float(np.percentile(nz, 15.0)) if nz.size > 0 else 1e-3
+        q_floor = 0.50 * q_step
+        if max(sigma_75, sigma_85) > 2.5 * sigma_50:
+            return float(max(sigma_50, sigma_75, sigma_85, q_floor))
+    return sigma_50
 
 
 # ---------------------------------------------------------------------------

@@ -128,6 +128,15 @@ class BeatCounterConfig:
     v2_min_rel_recovery: float = 0.50
     #  absolute floor: height >= v2_min_snr * noise sigma (guards recordings without contractions).
     v2_min_snr: float = 8.0
+    #  morphological impulse & embedded-spike filter (rejects isolated narrow impulses, localizes embedded spikes on sustained plateau)
+    v2_enable_impulse_filter: bool = True
+    #  Layer 2 signal interpretability & local window quality assessment
+    v2_enable_signal_interpretability_qc: bool = True
+    # User-facing continuous strictness coefficients [0.0 to 2.0, default 1.0]:
+    #  separation_strictness: controls recovery required between independent peaks (0.0 permissive -> 2.0 near-complete recovery)
+    v2_separation_strictness: float = 1.0
+    #  amplitude_strictness: controls minimum amplitude required for major contractions (0.0 no cutoff -> 2.0 100% of A_ref)
+    v2_amplitude_strictness: float = 1.0
 
     main_gap_fill_enabled: bool = True
     main_gap_fill_periodicity_min: float = 0.75

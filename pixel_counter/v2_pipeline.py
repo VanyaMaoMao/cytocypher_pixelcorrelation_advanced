@@ -14,7 +14,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from .config import BeatCounterConfig
-from .qc_v2 import compute_descriptive_metrics, evaluate_qc_v2
+from .qc_v2 import compute_descriptive_metrics, evaluate_qc_v2, evaluate_signal_interpretability_qc
 from .v2_detector import ACCEPTED, DetectorParams, detect_contractions, params_from_config
 from .v2_signal import compute_amplitude_waveform, determine_raw_polarity
 
@@ -115,10 +115,22 @@ def analyze_v2_pipeline(
     meta = dict(meta or {})
     params = (params or params_from_config(config)).validate()
     sig = np.asarray(sig, dtype=float)
-    metadata: Dict = {"time_origin_s": float(t0), "fs": float(fs) if np.isfinite(fs) else fs,
-                      "detector_params": {"min_rel_amplitude": params.min_rel_amplitude,
-                                          "min_rel_recovery": params.min_rel_recovery,
-                                          "min_snr": params.min_snr}}
+    metadata: Dict = {
+        "time_origin_s": float(t0),
+        "fs": float(fs) if np.isfinite(fs) else fs,
+        "detector_params": {
+            "min_rel_amplitude": params.min_rel_amplitude,
+            "min_rel_recovery": params.min_rel_recovery,
+            "min_snr": params.min_snr,
+        },
+        "separation_strictness": float(params.separation_strictness),
+        "amplitude_strictness": float(params.amplitude_strictness),
+        "strictness_coefficients": {
+            "separation_strictness": float(params.separation_strictness),
+            "amplitude_strictness": float(params.amplitude_strictness),
+        },
+        "contraction_frequency_hz": np.nan,
+    }
 
     status, reason, qc_meta = evaluate_qc_v2(sig, fs, meta, config)
     metadata.update(qc_meta)
@@ -130,6 +142,7 @@ def analyze_v2_pipeline(
         "waveform": {"raw": sig, "time_s": t0 + np.arange(sig.size) / fs if (np.isfinite(fs) and fs > 0) else np.array([]),
                      "amplitude": np.full(sig.size, np.nan), "baseline_raw": np.full(sig.size, np.nan)},
         "events": empty_events.assign(time_abs_s=[]),
+        "diagnostic_events": empty_events.assign(time_abs_s=[]),
         "candidates": {"candidate_index": np.array([], dtype=int), "time_s": np.array([], dtype=float),
                         "amplitude": np.array([], dtype=float), "status": np.array([], dtype=object)},
     }
@@ -154,7 +167,42 @@ def analyze_v2_pipeline(
         "auto_reason": pol.get("auto_reason", pol["reason"]),
     })
     if pol["best_polarity"] not in (-1, 1):
+        # Severe noise must take precedence over unresolved physiological polarity.
+        # Evaluate signal interpretability QC under both orientations (+1 and -1).
+        # If BOTH orientations evaluate to REJECT, then the signal is genuinely
+        # uninterpretable noise regardless of polarity, so output REJECT (noise_dominated_uninterpretable).
+        # If at least one orientation evaluates to PASS, then genuine contractions or clean quiescent
+        # conditions exist, and resolving polarity remains scientifically meaningful.
+        l2_evals = []
+        for test_p in (1, -1):
+            wf_t = compute_amplitude_waveform(sig, fs, test_p)
+            det_t = detect_contractions(wf_t["amplitude"], fs, params)
+            ev_t = det_t["events"].copy()
+            ev_t["time_abs_s"] = t0 + ev_t["time_rel_s"]
+            ev_t["raw_value"] = sig[ev_t["index"].to_numpy(dtype=int)] if len(ev_t) else np.array([])
+            st_t, rs_t, meta_t = evaluate_signal_interpretability_qc(
+                sig, wf_t["amplitude"], wf_t["baseline_raw"], fs, float(t0), ev_t, float(det_t["noise_sigma"]), config, meta=meta
+            )
+            l2_evals.append((st_t, rs_t, meta_t, det_t))
+
+        if all(e[0] != "PASS" for e in l2_evals):
+            reasons = [e[1] for e in l2_evals]
+            final_reason = "noise_dominated_uninterpretable" if "noise_dominated_uninterpretable" in reasons else reasons[0]
+            metadata.update({
+                "polarity_status": "POLARITY_INPUT_REQUIRED",
+                "qc_layer2_status": "REJECT",
+                "qc_layer2_reason": final_reason,
+                "signal_quality_category": final_reason,
+                "reference_amplitude": l2_evals[0][3]["reference_amplitude"],
+                "amplitude_threshold": l2_evals[0][3]["amplitude_threshold"],
+                "noise_sigma": l2_evals[0][3]["noise_sigma"],
+            })
+            metadata.update(l2_evals[0][2])
+            return _finish("REJECT", final_reason)
+
         metadata["polarity_status"] = "POLARITY_INPUT_REQUIRED"
+        metadata["qc_layer2_status"] = "NOT_RUN"
+        metadata["qc_layer2_reason"] = "polarity_undetermined"
         return _finish("REJECT", "polarity_undetermined")
 
     wf = compute_amplitude_waveform(sig, fs, int(pol["best_polarity"]))
@@ -174,11 +222,43 @@ def analyze_v2_pipeline(
         "width_s": acc["fwhm_s"].to_numpy(dtype=float),
         "status": np.array([ACCEPTED] * len(acc), dtype=object),
     }
+
+    l2_status, l2_reason, l2_meta = evaluate_signal_interpretability_qc(
+        sig, wf["amplitude"], wf["baseline_raw"], fs, float(t0), ev, float(det["noise_sigma"]), config, meta=meta
+    )
     metadata.update({
         "reference_amplitude": det["reference_amplitude"],
         "amplitude_threshold": det["amplitude_threshold"],
         "noise_sigma": det["noise_sigma"],
         "n_rejected": int((ev["status"] != ACCEPTED).sum()),
     })
-    metadata.update(compute_descriptive_metrics(acc["time_abs_s"].to_numpy(), acc["amplitude"].to_numpy()))
+    metadata.update(l2_meta)
+    if len(l2_meta.get("excluded_intervals_s", [])) > 0 and "partial_corrupted_intervals" not in metadata.get("qc_flags", []):
+        metadata.setdefault("qc_flags", []).append("partial_corrupted_intervals")
+    metadata.update(
+        compute_descriptive_metrics(
+            acc["time_abs_s"].to_numpy(),
+            acc["amplitude"].to_numpy(),
+            analyzable_duration_s=l2_meta.get("analyzable_duration_s"),
+            is_rejected=(l2_status != "PASS"),
+        )
+    )
+    result["diagnostic_events"] = ev.copy()
+    if l2_status != "PASS":
+        if len(ev):
+            ev_gated = ev.copy()
+            acc_mask = ev_gated["status"] == ACCEPTED
+            ev_gated.loc[acc_mask, "status"] = "REJECTED"
+            ev_gated.loc[acc_mask, "reason"] = f"qc_rejected_{l2_reason}"
+            result["events"] = ev_gated
+        result["candidates"] = {
+            "candidate_index": np.array([], dtype=int),
+            "time_s": np.array([], dtype=float),
+            "amplitude": np.array([], dtype=float),
+            "prominence": np.array([], dtype=float),
+            "width_s": np.array([], dtype=float),
+            "status": np.array([], dtype=object),
+        }
+        metadata["n_rejected"] = int(len(ev))
+        return _finish(l2_status, l2_reason)
     return _finish("PASS", "clean_signal" if len(acc) else "no_accepted_contractions")

@@ -29,7 +29,9 @@ from pixel_counter.config import BeatCounterConfig
 from pixel_counter.io_utils import extract_sample_id_from_segment_sheet, load_cytocypher_excel
 from pixel_counter.polarity_overrides import (
     compute_file_sha256,
+    default_overrides_path,
     load_polarity_overrides,
+    load_segment_rejections,
     parse_polarity_override_str,
     save_polarity_overrides,
 )
@@ -54,6 +56,7 @@ def _num(x):
 
 def _events_payload(v2_res):
     ev = v2_res["events"]
+    diag_ev = v2_res.get("diagnostic_events", ev)
     return {
         "index": [int(i) for i in ev["index"]],
         "time_s": [float(t) for t in ev["time_abs_s"]],
@@ -61,6 +64,8 @@ def _events_payload(v2_res):
         "raw_value": [_num(a) for a in ev["raw_value"]] if "raw_value" in ev else [None] * len(ev),
         "status": [str(s) for s in ev["status"]],
         "reason": [str(s) for s in ev["reason"]],
+        "diagnostic_status": [str(s) for s in diag_ev["status"]] if len(diag_ev) == len(ev) else [str(s) for s in ev["status"]],
+        "diagnostic_reason": [str(s) for s in diag_ev["reason"]] if len(diag_ev) == len(ev) else [str(s) for s in ev["reason"]],
     }
 
 
@@ -68,8 +73,19 @@ def _run_payload(v2_res):
     md = v2_res["metadata"]
     return {
         "params": md.get("detector_params", {}),
+        "separation_strictness": _num(md.get("separation_strictness")),
+        "amplitude_strictness": _num(md.get("amplitude_strictness")),
         "qc_status": md.get("qc_status", "UNKNOWN"),
         "qc_reason": md.get("qc_reason", ""),
+        "qc_layer1_status": md.get("qc_layer1_status", md.get("qc_status", "UNKNOWN")),
+        "qc_layer1_reason": md.get("qc_layer1_reason", ""),
+        "qc_layer2_status": md.get("qc_layer2_status", "PASS"),
+        "qc_layer2_reason": md.get("qc_layer2_reason", ""),
+        "signal_quality_category": md.get("signal_quality_category", ""),
+        "analyzable_duration_s": _num(md.get("analyzable_duration_s")),
+        "analyzable_fraction": _num(md.get("analyzable_fraction")),
+        "excluded_intervals_s": md.get("excluded_intervals_s", []),
+        "contraction_frequency_hz": _num(md.get("contraction_frequency_hz")),
         "reference_amplitude": _num(md.get("reference_amplitude")),
         "amplitude_threshold": _num(md.get("amplitude_threshold")),
         "noise_sigma": _num(md.get("noise_sigma")),
@@ -152,20 +168,26 @@ def process_workbook(
                 df_o, y_o, fs_o, _ = load_cytocypher_excel(file_path, sheet_name=sheet)
                 sig_o, _, meta_o = build_concatenated_signal(df_o, y_o, fs_o, config, force_invert=False)
                 t0_o = float(meta_o.get("time_origin_s", t0))
-                if len(sig_o) == len(sig_raw) and abs(t0_o - t0) < 0.5 / fs:
-                    return sig_o
-                tt = t0_o + np.arange(len(sig_o)) / fs_o
-                return np.interp(t0 + np.arange(len(sig_raw)) / fs, tt, sig_o, left=np.nan, right=np.nan)
+                return {
+                    "signal": sig_o,
+                    "fs": float(fs_o),
+                    "t0": float(t0_o),
+                    "length": int(len(sig_o)),
+                }
             except Exception as e:
                 return None
 
-        sig_cal = load_aux_channel("RatioMetricCalcium")
-        sig_int = load_aux_channel("PixelIntensity")
+        aux_cal = load_aux_channel("RatioMetricCalcium")
+        aux_int = load_aux_channel("PixelIntensity")
+        sig_cal = aux_cal["signal"] if aux_cal is not None else None
+        sig_int = aux_int["signal"] if aux_int is not None else None
         meta["sig_cal"] = sig_cal
         meta["sig_int"] = sig_int
 
         cal_for_polarity = sig_cal if use_ca else None
-        auto_pol = determine_raw_polarity(sig_raw, fs, sig_cal=cal_for_polarity, fs_cal=fs, t0_raw=t0, t0_cal=t0)
+        fs_cal_pol = aux_cal["fs"] if aux_cal is not None else fs
+        t0_cal_pol = aux_cal["t0"] if aux_cal is not None else t0
+        auto_pol = determine_raw_polarity(sig_raw, fs, sig_cal=cal_for_polarity, fs_cal=fs_cal_pol, t0_raw=t0, t0_cal=t0_cal_pol)
         ov = polarity_overrides.get(seg_num)
         ov_str = f"{ov:+d}" if ov in (-1, 1) else "AUTO"
         eff = ov if ov in (-1, 1) else auto_pol["polarity"]
@@ -192,8 +214,8 @@ def process_workbook(
             "auto_pol": auto_pol,
             "ov": ov,
             "eff": eff,
-            "sig_cal": sig_cal,
-            "sig_int": sig_int,
+            "aux_cal": aux_cal,
+            "aux_int": aux_int,
         })
 
     print(f"{'-'*84}")
@@ -225,13 +247,14 @@ def process_workbook(
         eff = item["eff"]
 
         runs = {}
-        first = None
+        r_runs_eff = {}
         for name, p in params_by_name.items():
             res = analyze_v2_pipeline(sig_raw, fs, config, t0=t0, meta=meta, params=p,
                                       polarity_override=eff if eff in (-1, 1) else None)
             runs[name] = _run_payload(res)
-            if first is None:
-                first = res
+            r_runs_eff[name] = res
+        pref_eff_name = "custom" if "custom" in r_runs_eff else ("default" if "default" in r_runs_eff else list(r_runs_eff.keys())[0])
+        first = r_runs_eff[pref_eff_name]
         wf = first["waveform"]
         pol = first["polarity_result"]
         has_amp = bool(np.isfinite(wf["amplitude"]).any())
@@ -240,13 +263,14 @@ def process_workbook(
         orientations = {}
         for fixed_pol, fixed_key in [(1, "1"), (-1, "-1")]:
             fixed_runs = {}
-            first_fixed = None
+            r_runs_raw = {}
             for name, p in params_by_name.items():
                 r_fix = analyze_v2_pipeline(sig_raw, fs, config, t0=t0, meta=meta, params=p,
                                             polarity_override=fixed_pol)
                 fixed_runs[name] = _run_payload(r_fix)
-                if first_fixed is None:
-                    first_fixed = r_fix
+                r_runs_raw[name] = r_fix
+            pref_name = "custom" if "custom" in r_runs_raw else ("default" if "default" in r_runs_raw else list(r_runs_raw.keys())[0])
+            first_fixed = r_runs_raw[pref_name]
             wf_fix = first_fixed["waveform"]
             orientations[fixed_key] = {
                 "amplitude_b64": b64_encode_array(wf_fix["amplitude"]),
@@ -257,8 +281,10 @@ def process_workbook(
                 "n_accepted": int(len(first_fixed["candidates"]["time_s"])),
             }
 
-        sig_int = item.get("sig_int")
-        sig_cal = item.get("sig_cal")
+        aux_int = item.get("aux_int")
+        aux_cal = item.get("aux_cal")
+        sig_int = aux_int["signal"] if aux_int else None
+        sig_cal = aux_cal["signal"] if aux_cal else None
 
         segments_data.append({
             "sheet_name": corr_sheet,
@@ -282,7 +308,13 @@ def process_workbook(
             "baseline_raw_b64": b64_encode_array(wf["baseline_raw"]) if has_amp else None,
             "amplitude_b64": b64_encode_array(wf["amplitude"]) if has_amp else None,
             "sig_int_b64": b64_encode_array(sig_int) if sig_int is not None and len(sig_int) else None,
+            "t0_int": aux_int["t0"] if aux_int else None,
+            "fs_int": aux_int["fs"] if aux_int else None,
+            "length_int": aux_int["length"] if aux_int else 0,
             "sig_cal_b64": b64_encode_array(sig_cal) if sig_cal is not None and len(sig_cal) else None,
+            "t0_cal": aux_cal["t0"] if aux_cal else None,
+            "fs_cal": aux_cal["fs"] if aux_cal else None,
+            "length_cal": aux_cal["length"] if aux_cal else 0,
             "runs": runs,
             "orientations": orientations,
         })
@@ -332,18 +364,56 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <label>Polarity: <select id="polarity_select"></select></label>
         <label>Detector strictness: <select id="run_select"></select></label>
         <label><input type="checkbox" id="chk_rejected"> Show rejected candidates (diagnostic)</label>
+        <label><input type="checkbox" id="chk_prelim_diagnostic"> Show preliminary candidates (diagnostic only)</label>
         <label><input type="checkbox" id="chk_raw"> Show raw PixelCorrelation</label>
         <label style="background:#eee; padding:5px; border-radius:3px;">
             <input type="checkbox" id="chk_reviewed"> Mark segment as reviewed</label>
+        <div style="background:#fff0f0; padding:5px 8px; border-radius:4px; border:1px solid #f5c2c7; display:inline-flex; align-items:center; gap:6px;">
+            <label style="color:#842029; font-weight:bold; cursor:pointer;" title="Reject entire recording from final counts and exports">
+                <input type="checkbox" id="chk_segment_rejected"> Reject entire segment
+            </label>
+            <select id="segment_rejection_reason" style="display:none; font-size:12px; padding:3px 6px;">
+                <option value="Poor signal / excessive noise">Poor signal / excessive noise</option>
+                <option value="Tracking or motion artifact">Tracking or motion artifact</option>
+                <option value="Incorrect recording">Incorrect recording</option>
+                <option value="Other / researcher decision">Other / researcher decision</option>
+            </select>
+        </div>
         <button id="btn_save">Save annotations (CSV)</button>
-        <button id="btn_export_overrides" class="btn-primary">Export polarity overrides (JSON)</button>
+        <button id="btn_export_overrides" class="btn-primary">Export overrides & rejections (JSON)</button>
+    </div>
+    <div id="peak_strictness_panel" style="background:#eef6ff; border:1px solid #b6d4fe; padding:7px 12px; border-radius:4px; margin-bottom:8px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; font-size:13px;">
+        <span style="font-weight:bold; color:#084298;">Per-Peak Detector Strictness:</span>
+        <label style="font-weight:bold;">Peak to edit:
+            <select id="peak_select" style="font-size:12px; padding:3px 6px; max-width:260px;">
+                <option value="none">-- Select peak --</option>
+            </select>
+        </label>
+        <span id="selected_peak_label" style="font-family:monospace; color:#333;">No peak selected (click any marker or choose from dropdown)</span>
+        <label style="font-weight:bold;">Per-peak strictness:
+            <select id="peak_strictness_select" disabled>
+                <option value="inherit">Use global setting</option>
+                <option value="permissive">Permissive</option>
+                <option value="default">Default</option>
+                <option value="strict">Strict</option>
+            </select>
+        </label>
+        <span style="font-size:12px; color:#555;">
+            Legend: <b style="color:#28a745;">&#9679; GREEN</b> = Automatically accepted &nbsp;|&nbsp;
+            <b style="color:#007bff;">&#9679; BLUE</b> = Manually added &nbsp;|&nbsp;
+            <b style="color:#dc3545;">&#10006; RED</b> = Rejected automatic peak
+        </span>
     </div>
     <div style="margin-bottom:8px;">
-        <b>Review:</b> click a green (ACCEPTED) or red (REJECTED) marker to flip its decision;
-        click on the amplitude trace to add a missed contraction (snapped to the local maximum).
+        <b>Review:</b> click a <b style="color:#28a745;">GREEN</b> (automatically accepted) peak to reject it into a visible <b style="color:#dc3545;">RED CROSS</b>;
+        click the same <b style="color:#dc3545;">RED CROSS</b> again to restore it to <b style="color:#28a745;">GREEN</b>;
+        click on an unmarked part of the amplitude trace to add a missed contraction in <b style="color:#007bff;">BLUE</b> (snapped to the local maximum);
+        click that same <b style="color:#007bff;">BLUE</b> peak again to delete it completely.
+        Use <b>Per-peak strictness</b> above to evaluate an individual peak under <i>Permissive</i>, <i>Default</i>, or <i>Strict</i> detector criteria, or return to <i>Use global setting</i>.
         Use the <b>Polarity</b> dropdown to inspect or override physiological orientation (+1 or -1) without re-running Python code.
     </div>
 
+    <div id="client_error_banner" class="fail" style="display:none; margin: 15px 0; font-size: 14px; background: #fff0f0; border: 2px solid #dc3545; color: #721c24; padding: 12px; border-radius: 4px;"></div>
     <div id="segment_info" class="info"></div>
     <div id="fail_box" class="fail" style="display:none"></div>
     <div id="param_box" class="params"></div>
@@ -361,18 +431,44 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
 
     <script>
+        window.addEventListener('error', function (e) {
+            console.error("Review UI Error:", e);
+            const eb = document.getElementById("client_error_banner");
+            if (eb) {
+                eb.style.display = "block";
+                eb.innerHTML = `⚠️ <b>JavaScript Error during report initialization:</b> ${e.message || e}`;
+            }
+        });
+
         const segments_data = __DATA__;
         const source_workbook = "__SOURCE__";
         const source_sha256 = "__SHA256__";
         const DEFAULT_RUN = "__DEFAULT_RUN__";
+        const initialSegmentRejections = __SEGMENT_REJECTIONS__;
 
         let currentSegIdx = 0;
         let currentRun = DEFAULT_RUN;
+        let selectedPeakInfo = null;     // { segIdx, polKey, index }
         const userPolarityOverride = {}; // key: segIdx -> 1, -1, or "auto"
+        const userSegmentRejection = {}; // key: segIdx -> {rejected: bool, reason: str}
         const annotations = {};          // key `${seg}|${polKey}|${run}` -> array of event records
+        const perPeakStrictness = {};    // key `${seg}|${polKey}` -> { [index]: "inherit"|"strict"|"default"|"permissive" }
+        const manualPeaksByPol = {};     // key `${seg}|${polKey}` -> { [index]: {index, time_s, amp, raw, action: "ADDED"|"REJECTED"|"ADDED_REJECTED"} }
         const segmentReviewed = {};
         const decodedSignals = {};
         const decodedOrientations = {};
+
+        if (initialSegmentRejections) {
+            segments_data.forEach((seg, idx) => {
+                const sNum = String(seg.segment_number);
+                if (initialSegmentRejections[sNum] && initialSegmentRejections[sNum].rejected) {
+                    userSegmentRejection[idx] = {
+                        rejected: true,
+                        reason: initialSegmentRejections[sNum].reason || "Other / researcher decision"
+                    };
+                }
+            });
+        }
 
         function decodeFloat32Array(b64) {
             if (!b64) return null;
@@ -417,6 +513,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             return t;
         }
 
+        function timesForCal(seg) {
+            if (!seg.t0_cal || !seg.fs_cal || !seg.length_cal) return timesFor(seg);
+            const t = new Float64Array(seg.length_cal);
+            for (let i = 0; i < seg.length_cal; i++) t[i] = seg.t0_cal + i / seg.fs_cal;
+            return t;
+        }
+
+        function timesForInt(seg) {
+            if (!seg.t0_int || !seg.fs_int || !seg.length_int) return timesFor(seg);
+            const t = new Float64Array(seg.length_int);
+            for (let i = 0; i < seg.length_int; i++) t[i] = seg.t0_int + i / seg.fs_int;
+            return t;
+        }
+
         function getActivePolarity(segIdx) {
             const seg = segments_data[segIdx];
             if (userPolarityOverride[segIdx] !== undefined) {
@@ -431,24 +541,179 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             return { pol: seg.auto_polarity, source: "automatic", isOverride: false };
         }
 
+        function getRunEvents(segIdx, polKey, runName) {
+            const seg = segments_data[segIdx];
+            if ((polKey === "1" || polKey === "-1") && seg.orientations && seg.orientations[polKey] && seg.orientations[polKey].runs[runName]) {
+                return seg.orientations[polKey].runs[runName].events;
+            }
+            if (seg.runs && seg.runs[runName]) {
+                return seg.runs[runName].events;
+            }
+            return {index: [], time_s: [], amplitude: [], raw_value: [], status: [], reason: [], diagnostic_status: [], diagnostic_reason: []};
+        }
+
+        function findCandidateInRun(segIdx, polKey, runName, sampleIdx, tolSamples) {
+            const ev = getRunEvents(segIdx, polKey, runName);
+            let bestK = -1, bestDist = Infinity;
+            for (let k = 0; k < ev.index.length; k++) {
+                const d = Math.abs(ev.index[k] - sampleIdx);
+                if (d <= tolSamples && d < bestDist) {
+                    bestDist = d;
+                    bestK = k;
+                }
+            }
+            if (bestK < 0) return null;
+            return {
+                index: ev.index[bestK],
+                time_s: ev.time_s[bestK],
+                amp: ev.amplitude[bestK],
+                raw: ev.raw_value[bestK],
+                status: ev.status[bestK],
+                reason: ev.reason[bestK] || ""
+            };
+        }
+
+        function syncPeakState(segIdx, run, polKey) {
+            const key = segIdx + "|" + polKey + "|" + run;
+            const anns = annotations[key];
+            if (!anns) return;
+            const seg = segments_data[segIdx];
+            const w = Math.max(1, Math.round(0.04 * seg.fs));
+            const minSep = Math.max(2, Math.round(0.12 * seg.fs));
+            const polMapKey = segIdx + "|" + polKey;
+            const ppMap = perPeakStrictness[polMapKey] || {};
+            const manMap = manualPeaksByPol[polMapKey] || {};
+
+            // 1. Reset auto events to baseline run state, then apply per-peak strictness overrides
+            for (let i = anns.length - 1; i >= 0; i--) {
+                const a = anns[i];
+                a.manually_rejected = false;
+                if (a.original_status === "MISSING") {
+                    const hasMan = Object.values(manMap).some(m => (m.action === "ADDED" || m.action === "ADDED_REJECTED") && Math.abs(m.index - a.index) <= w);
+                    const hasPp = Object.keys(ppMap).some(k => ppMap[k] !== "inherit" && Math.abs(parseInt(k) - a.index) <= w);
+                    if (!hasMan && !hasPp) {
+                        anns.splice(i, 1);
+                        continue;
+                    }
+                }
+                let ovPreset = "inherit";
+                for (const [kIdx, pVal] of Object.entries(ppMap)) {
+                    if (Math.abs(parseInt(kIdx) - a.index) <= w) {
+                        ovPreset = pVal;
+                        break;
+                    }
+                }
+                a.per_peak_strictness = ovPreset || "inherit";
+                if (a.per_peak_strictness !== "inherit") {
+                    const cand = findCandidateInRun(segIdx, polKey, a.per_peak_strictness, a.index, w);
+                    a.origin = "auto";
+                    if (cand) {
+                        a.status = cand.status;
+                        a.reason = cand.reason || (cand.status === "ACCEPTED" ? "" : `rejected_under_${a.per_peak_strictness}`);
+                        a.amp = cand.amp;
+                        a.raw = cand.raw;
+                    } else {
+                        a.status = "REJECTED";
+                        a.reason = `not_accepted_under_${a.per_peak_strictness}`;
+                    }
+                } else if (a.original_status !== "MISSING") {
+                    a.status = a.original_status;
+                    a.reason = a.original_reason || "";
+                    a.origin = "auto";
+                }
+            }
+
+            // 2. Enforce minimum cycle separation (deduplication) when per-peak strictness accepts a peak
+            const accList = anns.filter(a => a.status === "ACCEPTED" && a.origin === "auto");
+            for (let i = 0; i < accList.length; i++) {
+                for (let j = i + 1; j < accList.length; j++) {
+                    const a = accList[i], b = accList[j];
+                    if (a.status === "ACCEPTED" && b.status === "ACCEPTED" && Math.abs(a.index - b.index) < minSep) {
+                        if ((b.amp || 0) > (a.amp || 0)) {
+                            a.status = "REJECTED";
+                            a.reason = "duplicate_peak_within_cycle";
+                        } else {
+                            b.status = "REJECTED";
+                            b.reason = "duplicate_peak_within_cycle";
+                        }
+                    }
+                }
+            }
+
+            // 3. Apply persistent manual additions / manual rejections across runs
+            for (const mRec of Object.values(manMap)) {
+                const existing = anns.find(a => Math.abs(a.index - mRec.index) <= w);
+                if (mRec.action === "ADDED") {
+                    if (existing) {
+                        if (!existing.per_peak_strictness || existing.per_peak_strictness === "inherit") {
+                            existing.status = "ACCEPTED";
+                            existing.origin = "manual";
+                            existing.manually_rejected = false;
+                        }
+                    } else {
+                        anns.push({
+                            index: mRec.index,
+                            time_s: mRec.time_s,
+                            amp: mRec.amp,
+                            raw: mRec.raw,
+                            status: "ACCEPTED",
+                            original_status: "MISSING",
+                            original_reason: "",
+                            reason: "",
+                            origin: "manual",
+                            manually_rejected: false,
+                            per_peak_strictness: "inherit"
+                        });
+                    }
+                } else if (mRec.action === "REJECTED") {
+                    if (existing && (!existing.per_peak_strictness || existing.per_peak_strictness === "inherit")) {
+                        existing.status = "REJECTED";
+                        existing.origin = "auto";
+                        existing.manually_rejected = true;
+                        existing.reason = "manual_rejection";
+                    }
+                }
+            }
+            anns.sort((a, b) => a.index - b.index);
+        }
+
         function getAnn(segIdx, run, polKey) {
             const key = segIdx + "|" + polKey + "|" + run;
             if (!annotations[key]) {
                 const seg = segments_data[segIdx];
-                let ev = null;
-                if (polKey === "1" || polKey === "-1") {
-                    if (seg.orientations && seg.orientations[polKey]) {
-                        ev = seg.orientations[polKey].runs[run].events;
-                    }
-                }
-                if (!ev) {
-                    ev = seg.runs[run] ? seg.runs[run].events : {index: [], time_s: [], amplitude: [], raw_value: [], status: [], reason: []};
-                }
-                annotations[key] = ev.index.map((idx, i) => ({
+                const w = Math.max(1, Math.round(0.04 * seg.fs));
+                const ev = getRunEvents(segIdx, polKey, run);
+                const diagStatuses = ev.diagnostic_status || ev.status || [];
+                const diagReasons = ev.diagnostic_reason || ev.reason || [];
+                const list = ev.index.map((idx, i) => ({
                     index: idx, time_s: ev.time_s[i], amp: ev.amplitude[i], raw: ev.raw_value[i],
-                    status: ev.status[i], original_status: ev.status[i], reason: ev.reason[i], origin: "auto"
+                    status: ev.status[i], original_status: ev.status[i], original_reason: ev.reason[i] || "",
+                    reason: ev.reason[i] || "", origin: "auto", manually_rejected: false, per_peak_strictness: "inherit",
+                    diagnostic_status: diagStatuses[i] || ev.status[i],
+                    diagnostic_reason: diagReasons[i] || ev.reason[i] || ""
                 }));
+                // Also include any candidate from 'permissive' not already in list so it can be selected for per-peak strictness
+                const permEv = getRunEvents(segIdx, polKey, "permissive");
+                if (permEv && permEv.index) {
+                    const permDiagSt = permEv.diagnostic_status || permEv.status || [];
+                    permEv.index.forEach((pIdx, i) => {
+                        if (!list.some(a => Math.abs(a.index - pIdx) <= w)) {
+                            list.push({
+                                index: pIdx, time_s: permEv.time_s[i], amp: permEv.amplitude[i], raw: permEv.raw_value[i],
+                                status: "REJECTED", original_status: "REJECTED",
+                                original_reason: permEv.reason[i] || "below_global_strictness_threshold",
+                                reason: permEv.reason[i] || "below_global_strictness_threshold",
+                                origin: "auto", manually_rejected: false, per_peak_strictness: "inherit",
+                                diagnostic_status: permDiagSt[i] || "REJECTED",
+                                diagnostic_reason: permEv.reason[i] || "below_global_strictness_threshold"
+                            });
+                        }
+                    });
+                }
+                list.sort((a, b) => a.index - b.index);
+                annotations[key] = list;
             }
+            syncPeakState(segIdx, run, polKey);
             return annotations[key];
         }
 
@@ -459,17 +724,40 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (btnNext) btnNext.disabled = (currentSegIdx >= segments_data.length - 1);
         }
 
+        function getBaseRunQCStatus(segIdx, activePol, runKey) {
+            const seg = segments_data[segIdx];
+            runKey = runKey || currentRun;
+            if (activePol !== 1 && activePol !== -1) {
+                return { status: "REJECT", reason: seg.auto_reason || "polarity_undetermined" };
+            }
+            const polKey = String(activePol);
+            const oData = seg.orientations ? seg.orientations[polKey] : null;
+            if (oData) {
+                const r = (oData.runs && oData.runs[runKey]) ? oData.runs[runKey] : null;
+                return {
+                    status: (r && r.qc_status) ? r.qc_status : oData.qc_status,
+                    reason: (r && r.qc_reason) ? r.qc_reason : oData.qc_reason
+                };
+            }
+            return { status: seg.qc_status, reason: seg.qc_reason };
+        }
+
         function countsFor(idx, pol, runKey) {
             runKey = runKey || currentRun;
             if (pol !== 1 && pol !== -1) {
                 return {auto: 0, added: 0, rej: 0, final: 0};
             }
+            const baseQC = getBaseRunQCStatus(idx, pol, runKey);
+            const manualRej = userSegmentRejection[idx];
+            if ((manualRej && manualRej.rejected) || baseQC.status !== "PASS") {
+                return {auto: 0, added: 0, rej: 0, final: 0};
+            }
             const anns = getAnn(idx, runKey, String(pol));
             let auto = 0, added = 0, rej = 0, final = 0;
             anns.forEach(a => {
-                if (a.original_status === "ACCEPTED" && a.origin === "auto") auto++;
+                if (a.status === "ACCEPTED" && a.origin === "auto") auto++;
                 if (a.origin === "manual" && a.status === "ACCEPTED") added++;
-                if (a.origin === "auto" && a.original_status === "ACCEPTED" && a.status === "REJECTED") rej++;
+                if ((a.origin === "auto" && a.original_status === "ACCEPTED" && a.status === "REJECTED") || a.manually_rejected) rej++;
                 if (a.status === "ACCEPTED") final++;
             });
             return {auto, added, rej, final};
@@ -478,27 +766,64 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         function getActiveQC(segIdx, activePol, runKey) {
             const seg = segments_data[segIdx];
             runKey = runKey || currentRun;
+
+            const manualRej = userSegmentRejection[segIdx];
+            const isManualRejected = manualRej && manualRej.rejected;
+
             if (activePol !== 1 && activePol !== -1) {
+                if (isManualRejected) {
+                    return {
+                        status: "REJECT",
+                        reason: `manual: ${manualRej.reason}`,
+                        label: `Automatic QC: REJECT (${seg.qc_reason || "polarity_undetermined"}) | Manual QC: REJECT (${manualRej.reason}) | Final: REJECT`,
+                        isInputRequired: false,
+                        isZeroContractions: false,
+                        isManualRejection: true,
+                        manualReason: manualRej.reason,
+                        autoStatus: "REJECT",
+                        autoReason: seg.qc_reason || "polarity_undetermined",
+                        nAccepted: 0
+                    };
+                }
+                if (seg.qc_status !== "PASS" && seg.qc_reason !== "polarity_undetermined") {
+                    return {
+                        status: seg.qc_status,
+                        reason: seg.qc_reason,
+                        label: `QC: ${seg.qc_status} (${seg.qc_reason})`,
+                        isInputRequired: false,
+                        isZeroContractions: false,
+                        isManualRejection: false,
+                        nAccepted: 0
+                    };
+                }
                 return {
                     status: "INPUT_REQUIRED",
                     reason: seg.auto_reason || "polarity_undetermined",
                     label: "POLARITY INPUT REQUIRED",
                     isInputRequired: true,
                     isZeroContractions: false,
+                    isManualRejection: false,
                     nAccepted: 0
                 };
             }
-            const polKey = String(activePol);
-            const oData = seg.orientations ? seg.orientations[polKey] : null;
-            let baseStatus = "PASS";
-            let baseReason = "clean_signal";
-            if (oData) {
-                const r = (oData.runs && oData.runs[runKey]) ? oData.runs[runKey] : null;
-                baseStatus = (r && r.qc_status) ? r.qc_status : oData.qc_status;
-                baseReason = (r && r.qc_reason) ? r.qc_reason : oData.qc_reason;
-            } else {
-                baseStatus = seg.qc_status;
-                baseReason = seg.qc_reason;
+            const baseQC = getBaseRunQCStatus(segIdx, activePol, runKey);
+            const baseStatus = baseQC.status;
+            const baseReason = baseQC.reason;
+
+            if (isManualRejected) {
+                const autoDesc = (baseStatus === "PASS") ? (baseReason || "clean_signal") : baseReason;
+                return {
+                    status: "REJECT",
+                    reason: `manual: ${manualRej.reason}`,
+                    label: `Automatic QC: ${baseStatus} (${autoDesc}) | Manual QC: REJECT (${manualRej.reason}) | Final: REJECT`,
+                    isInputRequired: false,
+                    isZeroContractions: false,
+                    isManualRejection: true,
+                    manualReason: manualRej.reason,
+                    autoStatus: baseStatus,
+                    autoReason: autoDesc,
+                    nAccepted: 0
+                };
             }
 
             if (baseStatus !== "PASS") {
@@ -508,6 +833,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     label: `QC: ${baseStatus} (${baseReason})`,
                     isInputRequired: false,
                     isZeroContractions: false,
+                    isManualRejection: false,
                     nAccepted: 0
                 };
             }
@@ -521,6 +847,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     label: "QC: PASS (0 contractions)",
                     isInputRequired: false,
                     isZeroContractions: true,
+                    isManualRejection: false,
                     nAccepted: 0
                 };
             }
@@ -531,6 +858,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 label: `QC: PASS (${nAcc} contractions)`,
                 isInputRequired: false,
                 isZeroContractions: false,
+                isManualRejection: false,
                 nAccepted: nAcc
             };
         }
@@ -542,17 +870,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const opt = document.createElement("option");
                 opt.value = idx;
                 const polInfo = getActivePolarity(idx);
+                const qc = getActiveQC(idx, polInfo.pol);
                 let polDesc = "";
                 if (polInfo.pol === 0) {
-                    polDesc = "POLARITY INPUT REQUIRED";
+                    polDesc = qc.isInputRequired ? "POLARITY INPUT REQUIRED" : "undetermined";
                 } else if (polInfo.isOverride) {
                     polDesc = `override: ${polInfo.pol > 0 ? '+1' : '-1'}`;
                 } else {
                     polDesc = `auto: ${polInfo.pol > 0 ? '+1' : '-1'}`;
                 }
-                const qc = getActiveQC(idx, polInfo.pol);
                 let qcShort = "";
-                if (qc.isInputRequired) {
+                if (qc.isManualRejection) {
+                    qcShort = `MANUAL REJECT (${qc.manualReason})`;
+                } else if (qc.isInputRequired) {
                     qcShort = "QC: REJECT (polarity_undetermined)";
                 } else if (qc.status !== "PASS") {
                     qcShort = `QC: ${qc.status} (${qc.reason})`;
@@ -590,7 +920,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             optDown.text = "Raw -1 (downward contractions)";
             psel.appendChild(optDown);
 
-            const polInfo = getActivePolarity(currentSegIdx);
             if (userPolarityOverride[currentSegIdx] !== undefined) {
                 psel.value = String(userPolarityOverride[currentSegIdx]);
             } else if (seg.polarity_source === "manual_override") {
@@ -681,10 +1010,207 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 segmentReviewed[currentSegIdx] = e.target.checked; updateSummaryTable();
             });
             document.getElementById("chk_rejected").addEventListener("change", renderPlot);
+            const chkPrelim = document.getElementById("chk_prelim_diagnostic");
+            if (chkPrelim) chkPrelim.addEventListener("change", renderPlot);
             document.getElementById("chk_raw").addEventListener("change", renderPlot);
+
+            const chkRej = document.getElementById("chk_segment_rejected");
+            const selRejReason = document.getElementById("segment_rejection_reason");
+            chkRej.addEventListener("change", e => {
+                if (e.target.checked) {
+                    selRejReason.style.display = "inline-block";
+                    userSegmentRejection[currentSegIdx] = {
+                        rejected: true,
+                        reason: selRejReason.value
+                    };
+                } else {
+                    selRejReason.style.display = "none";
+                    delete userSegmentRejection[currentSegIdx];
+                }
+                populateSegmentSelector();
+                updateSummaryTable();
+                renderPlot();
+            });
+            selRejReason.addEventListener("change", e => {
+                if (userSegmentRejection[currentSegIdx]) {
+                    userSegmentRejection[currentSegIdx].reason = e.target.value;
+                    populateSegmentSelector();
+                    updateSummaryTable();
+                    renderPlot();
+                }
+            });
+
+            const pselPeakToEdit = document.getElementById("peak_select");
+            if (pselPeakToEdit) {
+                pselPeakToEdit.addEventListener("change", e => {
+                    const val = e.target.value;
+                    const polInfo = getActivePolarity(currentSegIdx);
+                    const activePol = polInfo.pol;
+                    const polKey = (activePol !== 1 && activePol !== -1) ? "0" : String(activePol);
+                    if (val === "none") {
+                        selectedPeakInfo = null;
+                    } else {
+                        selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: parseInt(val) };
+                    }
+                    const anns = getAnn(currentSegIdx, currentRun, polKey);
+                    updateSelectedPeakBar(anns, polKey);
+                    renderPlot();
+                });
+            }
+
+            const pselPeak = document.getElementById("peak_strictness_select");
+            if (pselPeak) {
+                pselPeak.addEventListener("change", e => {
+                    if (!selectedPeakInfo || selectedPeakInfo.segIdx !== currentSegIdx) return;
+                    const preset = e.target.value;
+                    const polMapKey = selectedPeakInfo.segIdx + "|" + selectedPeakInfo.polKey;
+                    if (!perPeakStrictness[polMapKey]) perPeakStrictness[polMapKey] = {};
+                    const seg = segments_data[currentSegIdx];
+                    const w = Math.max(1, Math.round(0.04 * seg.fs));
+                    // Clear any manual add/reject entry near this peak so detector preset rules apply cleanly
+                    if (manualPeaksByPol[polMapKey]) {
+                        Object.keys(manualPeaksByPol[polMapKey]).forEach(k => {
+                            if (Math.abs(parseInt(k) - selectedPeakInfo.index) <= w) {
+                                delete manualPeaksByPol[polMapKey][k];
+                            }
+                        });
+                    }
+                    // Update perPeakStrictness map
+                    Object.keys(perPeakStrictness[polMapKey]).forEach(k => {
+                        if (Math.abs(parseInt(k) - selectedPeakInfo.index) <= w) {
+                            delete perPeakStrictness[polMapKey][k];
+                        }
+                    });
+                    if (preset !== "inherit") {
+                        perPeakStrictness[polMapKey][selectedPeakInfo.index] = preset;
+                    }
+                    syncPeakState(currentSegIdx, currentRun, selectedPeakInfo.polKey);
+                    populateSegmentSelector();
+                    updateSummaryTable();
+                    renderPlot();
+                });
+            }
+
+            const btnRemManual = document.getElementById("btn_remove_manual_peak");
+            if (btnRemManual) {
+                btnRemManual.addEventListener("click", () => {
+                    if (!selectedPeakInfo || selectedPeakInfo.segIdx !== currentSegIdx) return;
+                    const polMapKey = selectedPeakInfo.segIdx + "|" + selectedPeakInfo.polKey;
+                    const seg = segments_data[currentSegIdx];
+                    const w = Math.max(1, Math.round(0.04 * seg.fs));
+                    const selIdx = selectedPeakInfo.index;
+                    if (manualPeaksByPol[polMapKey]) {
+                        Object.keys(manualPeaksByPol[polMapKey]).forEach(k => {
+                            if (Math.abs(parseInt(k) - selIdx) <= w) {
+                                delete manualPeaksByPol[polMapKey][k];
+                            }
+                        });
+                    }
+                    if (perPeakStrictness[polMapKey]) {
+                        Object.keys(perPeakStrictness[polMapKey]).forEach(k => {
+                            if (Math.abs(parseInt(k) - selIdx) <= w) {
+                                delete perPeakStrictness[polMapKey][k];
+                            }
+                        });
+                    }
+                    Object.keys(annotations).forEach(annK => {
+                        if (annK.startsWith(currentSegIdx + "|" + selectedPeakInfo.polKey + "|")) {
+                            const list = annotations[annK];
+                            for (let i = list.length - 1; i >= 0; i--) {
+                                if (Math.abs(list[i].index - selIdx) <= w) {
+                                    if (list[i].origin === "manual" || list[i].original_status === "MISSING") {
+                                        list.splice(i, 1);
+                                    } else {
+                                        list[i].status = list[i].original_status;
+                                        list[i].reason = list[i].original_reason || "";
+                                        list[i].origin = "auto";
+                                        list[i].manually_rejected = false;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    selectedPeakInfo = null;
+                    syncPeakState(currentSegIdx, currentRun, String(getActivePolarity(currentSegIdx).pol));
+                    populateSegmentSelector();
+                    updateSummaryTable();
+                    renderPlot();
+                });
+            }
+
             document.getElementById("source_name").innerText = source_workbook;
             document.getElementById("btn_save").addEventListener("click", saveAnnotations);
             document.getElementById("btn_export_overrides").addEventListener("click", exportPolarityOverrides);
+        }
+
+        function updatePeakSelector(anns, polKey) {
+            const psel = document.getElementById("peak_select");
+            if (!psel) return;
+            psel.innerHTML = "";
+            const defOpt = document.createElement("option");
+            defOpt.value = "none";
+            defOpt.text = "-- Select peak --";
+            psel.appendChild(defOpt);
+
+            const sortedAnns = anns.slice().sort((a, b) => a.index - b.index);
+            sortedAnns.forEach(a => {
+                const opt = document.createElement("option");
+                opt.value = String(a.index);
+                const tag = (a.origin === "manual") ? "Manual [BLUE]" : (a.status === "ACCEPTED" ? "Auto accepted [GREEN]" : "Rejected auto [RED]");
+                const strictTag = (a.per_peak_strictness && a.per_peak_strictness !== "inherit") ? ` (${a.per_peak_strictness})` : "";
+                opt.text = `${a.time_s.toFixed(3)}s — ${tag}${strictTag}`;
+                psel.appendChild(opt);
+            });
+
+            if (selectedPeakInfo && selectedPeakInfo.segIdx === currentSegIdx && selectedPeakInfo.polKey === polKey) {
+                const seg = segments_data[currentSegIdx];
+                const w = Math.max(1, Math.round(0.04 * seg.fs));
+                const matched = anns.find(a => Math.abs(a.index - selectedPeakInfo.index) <= w);
+                if (matched) {
+                    psel.value = String(matched.index);
+                } else {
+                    psel.value = "none";
+                }
+            } else {
+                psel.value = "none";
+            }
+        }
+
+        function updateSelectedPeakBar(anns, polKey) {
+            const lbl = document.getElementById("selected_peak_label");
+            const sel = document.getElementById("peak_strictness_select");
+            const btnRem = document.getElementById("btn_remove_manual_peak");
+            if (!lbl || !sel) return;
+            if (!selectedPeakInfo || selectedPeakInfo.segIdx !== currentSegIdx || selectedPeakInfo.polKey !== polKey) {
+                lbl.innerText = "No peak selected (click any marker or choose from dropdown)";
+                sel.value = "inherit";
+                sel.disabled = true;
+                if (btnRem) btnRem.style.display = "none";
+                return;
+            }
+            const seg = segments_data[currentSegIdx];
+            const w = Math.max(1, Math.round(0.04 * seg.fs));
+            const ev = anns.find(a => Math.abs(a.index - selectedPeakInfo.index) <= w);
+            if (!ev) {
+                lbl.innerText = "No peak selected (click any marker or choose from dropdown)";
+                sel.value = "inherit";
+                sel.disabled = true;
+                if (btnRem) btnRem.style.display = "none";
+                return;
+            }
+            const originTxt = (ev.origin === "manual") ? "manual" : "auto";
+            const isOverridden = (ev.per_peak_strictness && ev.per_peak_strictness !== "inherit");
+            const strictVal = isOverridden ? ev.per_peak_strictness : currentRun;
+            const strictSource = isOverridden ? "locally overridden" : "inherited";
+            const strictTxt = `${strictVal} (${strictSource})`;
+            const stateTxt = ev.status;
+            const reasonTxt = ev.reason ? ` [Reason: ${ev.reason}]` : "";
+            lbl.innerHTML = `Selected: <b>t=${ev.time_s.toFixed(3)}s</b> | Amp=<b>${ev.amp == null ? "n/a" : ev.amp.toFixed(4)}</b> | Origin: <b>${originTxt}</b> | Strictness: <b>${strictTxt}</b> | State: <b>${stateTxt}</b>${reasonTxt ? ` | <b>${reasonTxt}</b>` : ""}`;
+            sel.disabled = false;
+            sel.value = isOverridden ? ev.per_peak_strictness : "inherit";
+            if (btnRem) {
+                btnRem.style.display = (ev.origin === "manual") ? "inline-block" : "none";
+            }
         }
 
         function updateSummaryTable() {
@@ -697,7 +1223,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const tr = document.createElement("tr");
                 let polBadge = "";
                 if (polInfo.pol === 0) {
-                    polBadge = '<span style="color:#d9534f; font-weight:bold;">POLARITY INPUT REQUIRED</span>';
+                    polBadge = qc.isInputRequired ? '<span style="color:#d9534f; font-weight:bold;">POLARITY INPUT REQUIRED</span>' : '<span style="color:#6c757d;">undetermined (rejected)</span>';
                 } else if (polInfo.pol > 0) {
                     polBadge = `+1 (up) ${polInfo.isOverride ? '<span style="color:#0275d8; font-weight:bold;">[override]</span>' : '<span style="color:#5cb85c;">[auto]</span>'}`;
                 } else {
@@ -705,7 +1231,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 }
 
                 let qcHtml = "";
-                if (qc.isInputRequired) {
+                if (qc.isManualRejection) {
+                    qcHtml = `<span style="background:#f8d7da; color:#842029; padding:2px 6px; border-radius:3px; font-weight:bold;">MANUAL REJECT</span> <small>(${qc.manualReason})</small><br><small style="color:#666;">Auto: ${qc.autoStatus}</small>`;
+                } else if (qc.isInputRequired) {
                     qcHtml = '<span style="color:#d9534f; font-weight:bold;">REJECT (polarity_undetermined)</span>';
                 } else if (qc.status !== "PASS") {
                     qcHtml = `<span style="color:#d9534f; font-weight:bold;">${qc.status} (${qc.reason})</span>`;
@@ -740,9 +1268,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             updateNavButtons();
             document.getElementById("chk_reviewed").checked = !!segmentReviewed[currentSegIdx];
 
+            const chkRej = document.getElementById("chk_segment_rejected");
+            const selRejReason = document.getElementById("segment_rejection_reason");
+            const curManualRej = userSegmentRejection[currentSegIdx];
+            if (curManualRej && curManualRej.rejected) {
+                chkRej.checked = true;
+                selRejReason.style.display = "inline-block";
+                selRejReason.value = curManualRej.reason || "Poor signal / excessive noise";
+            } else {
+                chkRej.checked = false;
+                selRejReason.style.display = "none";
+            }
+
             const baseSig = getBaseSignals(currentSegIdx);
             const times = timesFor(seg);
             const qc = getActiveQC(currentSegIdx, activePol);
+            const isQCFailed = (qc.status !== "PASS");
 
             let run = null;
             let ampArr = null;
@@ -760,11 +1301,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             const hasAmp = (ampArr !== null && ampArr.length > 0);
             const showRej = document.getElementById("chk_rejected").checked;
-            const showRaw = document.getElementById("chk_raw").checked || !hasAmp;
+            const chkPrelim = document.getElementById("chk_prelim_diagnostic");
+            const showPrelimDiag = chkPrelim ? chkPrelim.checked : false;
+            const showRaw = document.getElementById("chk_raw").checked || !hasAmp || isQCFailed;
 
             let polTxt = "";
             if (isUndet) {
-                polTxt = `<span style="color:#d9534f; font-weight:bold;">POLARITY INPUT REQUIRED</span> [${seg.auto_reason}]`;
+                polTxt = qc.isInputRequired
+                    ? `<span style="color:#d9534f; font-weight:bold;">POLARITY INPUT REQUIRED</span> [${seg.auto_reason}]`
+                    : `<span style="color:#6c757d; font-weight:bold;">undetermined</span> [${seg.auto_reason}]`;
             } else {
                 const dir = activePol > 0 ? "+1 (contractions upward in raw)" : "-1 (contractions downward in raw)";
                 const tag = polInfo.isOverride ? "[manual override]" : `[automatic: ${seg.polarity_method}]`;
@@ -772,7 +1317,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
 
             let qcHeaderTxt = "";
-            if (qc.isInputRequired) {
+            if (qc.isManualRejection) {
+                qcHeaderTxt = `<span style="background:#f8d7da; color:#842029; padding:2px 6px; border-radius:3px; font-weight:bold;">MANUAL REJECT</span> <small>(${qc.manualReason})</small>`;
+            } else if (qc.isInputRequired) {
                 qcHeaderTxt = '<span style="color:#d9534f; font-weight:bold;">QC: REJECT (polarity_undetermined)</span>';
             } else if (qc.status !== "PASS") {
                 qcHeaderTxt = `<span style="color:#d9534f; font-weight:bold;">QC: ${qc.status} (${qc.reason})</span>`;
@@ -787,33 +1334,77 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 `raw polarity: ${polTxt} | ${qcHeaderTxt}`;
 
             const fb = document.getElementById("fail_box");
-            if (qc.isInputRequired) {
+            if (qc.isManualRejection) {
+                fb.className = "fail";
+                fb.style.display = "block";
+                fb.style.background = "#fff3cd";
+                fb.style.color = "#856404";
+                fb.style.borderColor = "#ffeeba";
+                fb.innerHTML = `⚠️ <b>MANUALLY REJECTED by researcher:</b> ${qc.manualReason}.<br>` +
+                    `<small style="color:#555;">(Automatic QC: ${qc.autoStatus} [${qc.autoReason}]). Final reportable accepted contraction count is 0. Uncheck 'Reject entire segment' above to restore this recording.</small>`;
+            } else if (qc.isInputRequired) {
                 fb.className = "polarity-banner";
                 fb.style.display = "block";
+                fb.style.background = "";
+                fb.style.color = "";
+                fb.style.borderColor = "";
                 fb.innerHTML = `⚠️ <b>POLARITY INPUT REQUIRED:</b> Automatic physiological polarity could not be determined for this recording (${seg.auto_reason}).<br>` +
                     `Select <b>Raw +1</b> or <b>Raw -1</b> in the Polarity dropdown above to inspect and evaluate contraction events.`;
             } else if (qc.status !== "PASS") {
                 fb.className = "fail";
                 fb.style.display = "block";
-                fb.innerText = `Segment technical failure (${qc.status}): ${qc.reason}.`;
+                fb.style.background = "";
+                fb.style.color = "";
+                fb.style.borderColor = "";
+                if (qc.reason === "noise_dominated_uninterpretable") {
+                    fb.innerHTML = `Segment interpretability failure (<b>${qc.status}: ${qc.reason}</b>) — signal is dominated by noise/artefacts without reliable contraction evidence. Final reportable accepted contractions: <b>0</b> (rate: <b>N/A</b>). Check <i>'Show preliminary candidates (diagnostic only)'</i> above to inspect excluded preliminary events.`;
+                } else {
+                    fb.innerHTML = `Segment quality control failure (<b>${qc.status}: ${qc.reason}</b>). Final reportable accepted contractions: <b>0</b> (rate: <b>N/A</b>).`;
+                }
             } else if (qc.isZeroContractions) {
                 fb.className = "params";
                 fb.style.display = "block";
-                fb.innerHTML = `ℹ️ <b>No Contractions Detected:</b> Signal processing succeeded (QC PASS), but zero contractions met the amplitude threshold and recovery criteria under strictness [${currentRun}].`;
+                fb.style.background = "";
+                fb.style.color = "";
+                fb.style.borderColor = "";
+                fb.innerHTML = `ℹ️ <b>No Contractions Detected (Clean Quiescent Signal):</b> Technical and signal interpretability QC passed, and zero contractions met the amplitude threshold and recovery criteria under strictness [${currentRun}].`;
             } else {
                 fb.style.display = "none";
             }
 
-            const p = run.params || {};
-            document.getElementById("param_box").innerText =
-                `Active detector parameters [${currentRun}]: min_rel_amplitude=${p.min_rel_amplitude || "0.50"}  ` +
-                `min_rel_recovery=${p.min_rel_recovery || "0.50"}  min_snr=${p.min_snr || "8"}  |  ` +
-                `reference amplitude=${run.reference_amplitude === null ? "n/a" : run.reference_amplitude.toFixed(4)}  ` +
-                `amplitude threshold=${run.amplitude_threshold === null ? "n/a" : run.amplitude_threshold.toFixed(4)}  ` +
-                `noise sigma=${run.noise_sigma === null ? "n/a" : run.noise_sigma.toExponential(2)}`;
-
             const anns = getAnn(currentSegIdx, currentRun, polKey);
-            const nAcc = anns.filter(a => a.status === "ACCEPTED").length;
+            updateSelectedPeakBar(anns, polKey);
+            updatePeakSelector(anns, polKey);
+            const activeCounts = countsFor(currentSegIdx, activePol, currentRun);
+            const nAcc = activeCounts.final;
+
+            const p = run.params || {};
+            const sigCat = run.signal_quality_category || run.qc_layer2_reason || "n/a";
+            const durTxt = (run.analyzable_duration_s !== null && run.analyzable_duration_s !== undefined)
+                ? `${run.analyzable_duration_s.toFixed(2)}s (${(100 * (run.analyzable_fraction || 1)).toFixed(0)}%)`
+                : "n/a";
+            let rateTxt = "N/A";
+            if (!isQCFailed && !qc.isManualRejection && run.analyzable_duration_s && run.analyzable_duration_s > 0 && nAcc > 0) {
+                rateTxt = `${(nAcc / run.analyzable_duration_s).toFixed(2)} Hz`;
+            }
+            const exclTxt = (run.excluded_intervals_s && run.excluded_intervals_s.length > 0)
+                ? `  |  excluded intervals=${run.excluded_intervals_s.map(iv => iv[0].toFixed(2) + "-" + iv[1].toFixed(2) + "s").join(", ")}`
+                : "";
+            const sepStrict = (run.separation_strictness !== null && run.separation_strictness !== undefined)
+                ? run.separation_strictness.toFixed(2)
+                : ((p.separation_strictness !== undefined && p.separation_strictness !== null) ? p.separation_strictness.toFixed(2) : "1.00");
+            const ampStrict = (run.amplitude_strictness !== null && run.amplitude_strictness !== undefined)
+                ? run.amplitude_strictness.toFixed(2)
+                : ((p.amplitude_strictness !== undefined && p.amplitude_strictness !== null) ? p.amplitude_strictness.toFixed(2) : "1.00");
+
+            document.getElementById("param_box").innerText =
+                `Active detector parameters [${currentRun}]: strictness=(sep:${sepStrict}, amp:${ampStrict})  ` +
+                `min_rel_amplitude=${p.min_rel_amplitude || "0.50"}  ` +
+                `min_rel_recovery=${p.min_rel_recovery || "0.50"}  min_snr=${p.min_snr || "8"}  |  ` +
+                `reference amplitude=${run.reference_amplitude == null ? "n/a" : run.reference_amplitude.toFixed(4)}  ` +
+                `amplitude threshold=${run.amplitude_threshold == null ? "n/a" : run.amplitude_threshold.toFixed(4)}  ` +
+                `noise sigma=${run.noise_sigma == null ? "n/a" : run.noise_sigma.toExponential(2)}  |  ` +
+                `quality=${sigCat}  valid duration=${durTxt}  rate=${rateTxt}${exclTxt}`;
 
             const panels = [];
             if (hasAmp) panels.push({key: "amp", title: "Contraction amplitude A<br>(relative to resting baseline)", weight: 3});
@@ -849,35 +1440,101 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 if (baseArr) traces.push({x: times, y: baseArr, mode: "lines", name: "resting baseline B_raw",
                              line: {color: "gray", dash: "dot", width: 1.2}, yaxis: P.raw.ax, xaxis: "x", hoverinfo: "skip"});
             }
-            if (P.int && baseSig.inten) traces.push({x: times, y: baseSig.inten, mode: "lines", name: "PixelIntensity", line: {color: "green", width: 1}, yaxis: P.int.ax, xaxis: "x"});
-            if (P.cal && baseSig.cal) traces.push({x: times, y: baseSig.cal, mode: "lines", name: "RatioMetricCalcium", line: {color: "firebrick", width: 1}, yaxis: P.cal.ax, xaxis: "x"});
+            if (P.int && baseSig.inten) traces.push({x: timesForInt(seg), y: baseSig.inten, mode: "lines", name: "PixelIntensity", line: {color: "green", width: 1}, yaxis: P.int.ax, xaxis: "x", connectgaps: false});
+            if (P.cal && baseSig.cal) traces.push({x: timesForCal(seg), y: baseSig.cal, mode: "lines", name: "RatioMetricCalcium", line: {color: "firebrick", width: 1}, yaxis: P.cal.ax, xaxis: "x", connectgaps: false});
 
-            function markerTrace(status, panelKey, yField, style, name) {
+            function customMarkerTrace(predicateFn, panelKey, yField, style, name) {
                 const pk = P[panelKey]; if (!pk) return;
                 const xs = [], ys = [], cd = [], tx = [];
                 anns.forEach((a, i) => {
-                    if (a.status !== status) return;
+                    if (!predicateFn(a)) return;
                     const y = a[yField]; if (y === null || y === undefined) return;
                     xs.push(a.time_s); ys.push(y); cd.push(i);
-                    tx.push(`t=${a.time_s.toFixed(3)} s<br>A=${a.amp === null ? "n/a" : a.amp.toFixed(4)}<br>` +
-                            `${a.origin === "manual" ? "manual" : (a.original_status + (a.reason ? ": " + a.reason : ""))}`);
+                    const strictTag = (a.per_peak_strictness && a.per_peak_strictness !== "inherit")
+                        ? ` [per-peak strictness: ${a.per_peak_strictness}]`
+                        : "";
+                    let sourceText = "";
+                    if (isQCFailed) {
+                        sourceText = `EXCLUDED (QC ${qc.status}: ${qc.reason}) [diagnostic preliminary candidate]`;
+                    } else if (a.origin === "manual") {
+                        sourceText = "Source: Manual addition (click to delete)" + strictTag;
+                    } else if (a.manually_rejected) {
+                        sourceText = "MANUALLY REJECTED (was auto ACCEPTED — click red cross to restore to GREEN)" + strictTag;
+                    } else {
+                        sourceText = a.status + (a.reason ? ": " + a.reason : "") + strictTag;
+                    }
+                    tx.push(`t=${a.time_s.toFixed(3)} s<br>A=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>${sourceText}`);
                 });
                 traces.push(Object.assign({x: xs, y: ys, customdata: cd, text: tx, hoverinfo: "text", mode: "markers", name: name,
                                            yaxis: pk.ax, xaxis: "x", type: "scatter"}, style));
             }
 
             if (!isUndet && hasAmp) {
-                markerTrace("ACCEPTED", "amp", "amp", {marker: {color: "green", size: 10, symbol: "circle"}}, `ACCEPTED (${nAcc})`);
-                markerTrace("ACCEPTED", "raw", "raw", {marker: {color: "green", size: 9, symbol: "circle"}, showlegend: false}, "ACCEPTED (raw)");
-                if (showRej) {
-                    markerTrace("REJECTED", "amp", "amp", {marker: {color: "red", size: 8, symbol: "x"}}, "REJECTED candidates");
-                    markerTrace("REJECTED", "raw", "raw", {marker: {color: "red", size: 8, symbol: "x"}, showlegend: false}, "REJECTED (raw)");
+                if (isQCFailed || qc.isManualRejection) {
+                    // Segment failed QC or was manually rejected: NO GREEN or BLUE accepted markers may appear!
+                    if (showPrelimDiag || qc.isManualRejection) {
+                        const predPrelim = a => (a.diagnostic_status === "ACCEPTED" || a.status === "ACCEPTED");
+                        customMarkerTrace(predPrelim, "amp", "amp", {marker: {color: "#888888", size: 8, symbol: "circle-open"}, opacity: 0.65}, "EXCLUDED preliminary candidates (diagnostic)");
+                        customMarkerTrace(predPrelim, "raw", "raw", {marker: {color: "#888888", size: 7, symbol: "circle-open"}, opacity: 0.65, showlegend: false}, "EXCLUDED (raw)");
+                    }
+                    if (showRej) {
+                        const predDiagRej = a => (a.diagnostic_status !== "ACCEPTED" && a.status !== "ACCEPTED");
+                        customMarkerTrace(predDiagRej, "amp", "amp", {marker: {color: "#dc3545", size: 8, symbol: "x"}, opacity: 0.65}, "REJECTED candidates (diagnostic)");
+                        customMarkerTrace(predDiagRej, "raw", "raw", {marker: {color: "#dc3545", size: 8, symbol: "x"}, opacity: 0.65, showlegend: false}, "REJECTED (raw)");
+                    }
+                } else {
+                    const nAutoAcc = anns.filter(a => a.status === "ACCEPTED" && a.origin !== "manual").length;
+                    const nManualAcc = anns.filter(a => a.status === "ACCEPTED" && a.origin === "manual").length;
+                    const nManRej = anns.filter(a => a.status === "REJECTED" && a.manually_rejected).length;
+
+                    customMarkerTrace(a => a.status === "ACCEPTED" && a.origin !== "manual", "amp", "amp",
+                        {marker: {color: "#28a745", size: 10, symbol: "circle"}}, `Automatically accepted (${nAutoAcc})`);
+                    customMarkerTrace(a => a.status === "ACCEPTED" && a.origin !== "manual", "raw", "raw",
+                        {marker: {color: "#28a745", size: 9, symbol: "circle"}, showlegend: false}, "Automatically accepted (raw)");
+
+                    customMarkerTrace(a => a.status === "ACCEPTED" && a.origin === "manual", "amp", "amp",
+                        {marker: {color: "#007bff", size: 10, symbol: "circle", line: {color: "#004085", width: 1.5}}}, `Manually added (${nManualAcc})`);
+                    customMarkerTrace(a => a.status === "ACCEPTED" && a.origin === "manual", "raw", "raw",
+                        {marker: {color: "#007bff", size: 9, symbol: "circle", line: {color: "#004085", width: 1.5}}, showlegend: false}, "Manually added (raw)");
+
+                    // Explicitly manually rejected auto peaks ALWAYS remain visible as a RED CROSS regardless of chk_rejected!
+                    customMarkerTrace(a => a.status === "REJECTED" && a.manually_rejected, "amp", "amp",
+                        {marker: {color: "#dc3545", size: 10, symbol: "x", line: {color: "#a71d2a", width: 1.5}}}, `Rejected automatic peak (${nManRej})`);
+                    customMarkerTrace(a => a.status === "REJECTED" && a.manually_rejected, "raw", "raw",
+                        {marker: {color: "#dc3545", size: 9, symbol: "x", line: {color: "#a71d2a", width: 1.5}}, showlegend: false}, "Rejected automatic peak (raw)");
+
+                    if (showRej) {
+                        customMarkerTrace(a => a.status === "REJECTED" && !a.manually_rejected, "amp", "amp",
+                            {marker: {color: "#888888", size: 8, symbol: "circle-open"}}, "Excluded candidates (diagnostic)");
+                        customMarkerTrace(a => a.status === "REJECTED" && !a.manually_rejected, "raw", "raw",
+                            {marker: {color: "#888888", size: 8, symbol: "circle-open"}, showlegend: false}, "Excluded (raw)");
+                    }
+                }
+                // Highlight currently selected peak for per-peak strictness
+                if (selectedPeakInfo && selectedPeakInfo.segIdx === currentSegIdx && selectedPeakInfo.polKey === polKey && P.amp) {
+                    const w = Math.max(1, Math.round(0.04 * seg.fs));
+                    const selEvIdx = anns.findIndex(a => Math.abs(a.index - selectedPeakInfo.index) <= w);
+                    if (selEvIdx >= 0) {
+                        const selEv = anns[selEvIdx];
+                        traces.push({
+                            x: [selEv.time_s], y: [selEv.amp], customdata: [selEvIdx],
+                            mode: "markers", name: "SELECTED peak",
+                            marker: {color: "rgba(0,0,0,0)", size: 16, symbol: "circle", line: {color: "#ff9800", width: 2.5}},
+                            yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"
+                        });
+                    }
                 }
             }
 
+            let titleCountTxt = `— accepted contractions: ${nAcc}`;
+            if (qc.isManualRejection) {
+                titleCountTxt = `— [MANUALLY REJECTED: ${qc.manualReason}] — accepted contractions: 0`;
+            } else if (isQCFailed) {
+                titleCountTxt = `— [QC ${qc.status}: ${qc.reason}] — accepted contractions: 0`;
+            }
             const layout = {
                 title: `${seg.sheet_name} — raw polarity ${activePol > 0 ? "+1" : (activePol < 0 ? "-1" : "UNDETERMINED")} ` +
-                       `— accepted contractions: ${nAcc} — strictness: ${currentRun}`,
+                       `${titleCountTxt} — strictness: ${currentRun}`,
                 hovermode: "closest", height: Math.max(520, 260 * panels.length + 120),
                 uirevision: currentSegIdx + "|" + currentRun + "|" + polKey + "|" + showRaw,
                 xaxis: {title: "Time (s)", anchor: "y" + (panels.length === 1 ? "" : panels.length), domain: [0, 1]},
@@ -900,23 +1557,114 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const el = document.getElementById("plot");
             el.removeAllListeners && el.removeAllListeners("plotly_click");
             el.on("plotly_click", function (data) {
-                if (isUndet) return;
+                if (isUndet || isQCFailed || qc.isManualRejection) return;
                 const pt = data.points[0];
                 const name = pt.data.name || "";
+                const polMapKey = currentSegIdx + "|" + polKey;
+                if (!manualPeaksByPol[polMapKey]) manualPeaksByPol[polMapKey] = {};
+                if (!perPeakStrictness[polMapKey]) perPeakStrictness[polMapKey] = {};
+                const manMap = manualPeaksByPol[polMapKey];
+                const ppMap = perPeakStrictness[polMapKey];
+                const w = Math.max(1, Math.round(0.04 * seg.fs));
+
+                function deleteManualPeak(ev) {
+                    const selIdx = ev.index;
+                    Object.keys(ppMap).forEach(k => { if (Math.abs(parseInt(k) - selIdx) <= w) delete ppMap[k]; });
+                    Object.keys(manMap).forEach(k => { if (Math.abs(parseInt(k) - selIdx) <= w) delete manMap[k]; });
+                    Object.keys(annotations).forEach(annK => {
+                        if (annK.startsWith(currentSegIdx + "|" + polKey + "|")) {
+                            const list = annotations[annK];
+                            for (let i = list.length - 1; i >= 0; i--) {
+                                if (Math.abs(list[i].index - selIdx) <= w) {
+                                    if (list[i].origin === "manual" || list[i].original_status === "MISSING") {
+                                        list.splice(i, 1);
+                                    } else {
+                                        list[i].status = list[i].original_status;
+                                        list[i].reason = list[i].original_reason || "";
+                                        list[i].origin = "auto";
+                                        list[i].manually_rejected = false;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    selectedPeakInfo = null;
+                }
+
+                function toggleEventState(evObj) {
+                    if (evObj.origin === "manual") {
+                        // Manually added BLUE peak clicked again -> completely delete it!
+                        // NOTHING -> BLUE -> NOTHING (no red cross, decrements count, leaves no ghost)
+                        deleteManualPeak(evObj);
+                        return;
+                    }
+
+                    // Auto peak: GREEN -> RED CROSS -> GREEN
+                    Object.keys(ppMap).forEach(k => { if (Math.abs(parseInt(k) - evObj.index) <= w) delete ppMap[k]; });
+                    evObj.per_peak_strictness = "inherit";
+
+                    if (evObj.status === "ACCEPTED") {
+                        // Auto GREEN peak clicked -> turns into visible RED CROSS
+                        evObj.status = "REJECTED";
+                        evObj.origin = "auto";
+                        evObj.manually_rejected = true;
+                        evObj.reason = "manual_rejection";
+                        manMap[evObj.index] = { index: evObj.index, time_s: evObj.time_s, amp: evObj.amp, raw: evObj.raw, action: "REJECTED" };
+                    } else {
+                        // Event is currently REJECTED (a RED CROSS) -> restore back to GREEN!
+                        evObj.status = "ACCEPTED";
+                        evObj.origin = "auto";
+                        evObj.manually_rejected = false;
+                        evObj.reason = evObj.original_reason || "";
+                        Object.keys(manMap).forEach(k => { if (Math.abs(parseInt(k) - evObj.index) <= w) delete manMap[k]; });
+                    }
+                }
+
                 if (pt.customdata !== undefined && pt.customdata !== null) {
                     const a = anns[pt.customdata];
-                    a.status = (a.status === "ACCEPTED") ? "REJECTED" : "ACCEPTED";
+                    if (!a) return;
+                    if (a.origin === "manual") {
+                        deleteManualPeak(a);
+                        selectedPeakInfo = null;
+                    } else {
+                        toggleEventState(a);
+                        selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: a.index };
+                    }
                 } else if (name === "amplitude" && P.amp && ampArr) {
-                    const w = Math.round(0.04 * seg.fs);
                     let c = Math.round((pt.x - seg.t0) * seg.fs);
                     let lo = Math.max(0, c - w), hi = Math.min(seg.length - 1, c + w), best = -1, bv = -Infinity;
                     for (let i = lo; i <= hi; i++) if (Number.isFinite(ampArr[i]) && ampArr[i] > bv) { bv = ampArr[i]; best = i; }
                     if (best < 0) return;
                     const existing = anns.find(a => Math.abs(a.index - best) <= w);
-                    if (existing) { existing.status = existing.status === "ACCEPTED" ? "REJECTED" : "ACCEPTED"; }
-                    else anns.push({index: best, time_s: seg.t0 + best / seg.fs, amp: ampArr[best], raw: baseSig.raw[best],
-                                    status: "ACCEPTED", original_status: "MISSING", reason: "", origin: "manual"});
+                    if (existing && (existing.status === "ACCEPTED" || existing.manually_rejected)) {
+                        if (existing.origin === "manual") {
+                            deleteManualPeak(existing);
+                            selectedPeakInfo = null;
+                        } else {
+                            toggleEventState(existing);
+                            selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: existing.index };
+                        }
+                    } else {
+                        // Unmarked trace location: add BLUE manually added peak
+                        let targetEv = existing;
+                        if (!targetEv) {
+                            targetEv = {
+                                index: best, time_s: seg.t0 + best / seg.fs, amp: ampArr[best], raw: baseSig.raw[best],
+                                status: "ACCEPTED", original_status: "MISSING", original_reason: "",
+                                reason: "", origin: "manual", manually_rejected: false, per_peak_strictness: "inherit"
+                            };
+                            anns.push(targetEv);
+                        } else {
+                            targetEv.status = "ACCEPTED";
+                            targetEv.origin = "manual";
+                            targetEv.manually_rejected = false;
+                            targetEv.reason = "";
+                        }
+                        manMap[targetEv.index] = { index: targetEv.index, time_s: targetEv.time_s, amp: targetEv.amp, raw: targetEv.raw, action: "ADDED" };
+                        selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: targetEv.index };
+                    }
                 } else { return; }
+                syncPeakState(currentSegIdx, currentRun, polKey);
                 updateSummaryTable();
                 populateSegmentSelector();
                 renderPlot();
@@ -934,8 +1682,65 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     count++;
                 }
             });
-            if (count === 0) {
-                alert("No manual polarity overrides have been specified yet.\n\nSelect Raw +1 or Raw -1 from the Polarity dropdown for any segment before exporting.");
+
+            const rejections = {};
+            let nRejections = 0;
+            segments_data.forEach((seg, idx) => {
+                const r = userSegmentRejection[idx];
+                if (r && r.rejected) {
+                    rejections[String(seg.segment_number)] = {
+                        rejected: true,
+                        reason: r.reason || "Other / researcher decision"
+                    };
+                    nRejections++;
+                }
+            });
+
+            const perPeakOverrides = {};
+            let nPerPeak = 0;
+            Object.entries(perPeakStrictness).forEach(([polMapKey, mapObj]) => {
+                const [sIdxStr, pKey] = polMapKey.split("|");
+                const seg = segments_data[parseInt(sIdxStr)];
+                if (!seg) return;
+                Object.entries(mapObj).forEach(([sampleIdxStr, preset]) => {
+                    if (preset && preset !== "inherit") {
+                        const sNum = String(seg.segment_number);
+                        if (!perPeakOverrides[sNum]) perPeakOverrides[sNum] = [];
+                        const sIdx = parseInt(sampleIdxStr);
+                        perPeakOverrides[sNum].push({
+                            polarity: parseInt(pKey),
+                            sample_index: sIdx,
+                            time_s: Number((seg.t0 + sIdx / seg.fs).toFixed(4)),
+                            per_peak_strictness: preset
+                        });
+                        nPerPeak++;
+                    }
+                });
+            });
+
+            const manualEdits = {};
+            let nManualEdits = 0;
+            Object.entries(manualPeaksByPol).forEach(([polMapKey, mapObj]) => {
+                const [sIdxStr, pKey] = polMapKey.split("|");
+                const seg = segments_data[parseInt(sIdxStr)];
+                if (!seg) return;
+                Object.values(mapObj).forEach(mRec => {
+                    const sNum = String(seg.segment_number);
+                    if (!manualEdits[sNum]) manualEdits[sNum] = [];
+                    manualEdits[sNum].push({
+                        polarity: parseInt(pKey),
+                        sample_index: mRec.index,
+                        time_s: Number(mRec.time_s.toFixed(4)),
+                        amplitude: mRec.amp,
+                        action: mRec.action,
+                        origin: (mRec.action === "ADDED" || mRec.action === "ADDED_REJECTED") ? "manual" : "auto"
+                    });
+                    nManualEdits++;
+                });
+            });
+
+            if (count === 0 && nRejections === 0 && nPerPeak === 0 && nManualEdits === 0) {
+                alert("No manual polarity overrides, segment rejections, per-peak strictness overrides, or manual peak edits have been specified yet.");
                 return;
             }
             const payload = {
@@ -943,7 +1748,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 "workbook_sha256": source_sha256,
                 "export_timestamp": new Date().toISOString(),
                 "total_overrides": count,
-                "overrides": overrides
+                "total_segment_rejections": nRejections,
+                "total_per_peak_strictness_overrides": nPerPeak,
+                "total_manual_peak_edits": nManualEdits,
+                "overrides": overrides,
+                "segment_rejections": rejections,
+                "per_peak_strictness": perPeakOverrides,
+                "manual_peak_edits": manualEdits
             };
             const jsonStr = JSON.stringify(payload, null, 2);
             const blob = new Blob([jsonStr], {type: "application/json;charset=utf-8;"});
@@ -962,18 +1773,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
             const annotatorId = prompt("Enter annotator initials (e.g., JD):", "XX");
             if (!annotatorId) return;
-            let csv = "source_workbook,sheet_name,sample_id,time_s,confidence,annotator_id,amplitude,origin,strictness,min_rel_amplitude,min_rel_recovery,min_snr,polarity,qc_status,qc_reason\n";
+            let csv = "source_workbook,sheet_name,sample_id,time_s,confidence,annotator_id,amplitude,origin,strictness,per_peak_strictness,min_rel_amplitude,min_rel_recovery,min_snr,polarity,qc_status,qc_reason\n";
             segments_data.forEach((seg, idx) => {
                 if (!segmentReviewed[idx]) return;
+                const manualRej = userSegmentRejection[idx];
+                if (manualRej && manualRej.rejected) return;
                 const polInfo = getActivePolarity(idx);
                 if (polInfo.pol !== 1 && polInfo.pol !== -1) return;
                 const polKey = String(polInfo.pol);
-                const sp = seg.orientations[polKey].runs[currentRun].params;
                 const qc = getActiveQC(idx, polInfo.pol, currentRun);
+                if (qc.status !== "PASS") return;
                 getAnn(idx, currentRun, polKey).forEach(a => {
                     if (a.status !== "ACCEPTED") return;
+                    const effStrictness = (a.per_peak_strictness && a.per_peak_strictness !== "inherit") ? a.per_peak_strictness : currentRun;
+                    const sp = (seg.orientations[polKey].runs[effStrictness] || seg.orientations[polKey].runs[currentRun]).params;
+                    const ppStrict = a.per_peak_strictness || "inherit";
                     csv += `"${source_workbook}","${seg.sheet_name}","${seg.sample_id}",${a.time_s},1,"${annotatorId}",` +
-                           `${a.amp === null ? "" : a.amp},${a.origin},${currentRun},${sp.min_rel_amplitude},${sp.min_rel_recovery},${sp.min_snr},${polInfo.pol},` +
+                           `${a.amp === null ? "" : a.amp},${a.origin},${effStrictness},${ppStrict},${sp.min_rel_amplitude},${sp.min_rel_recovery},${sp.min_snr},${polInfo.pol},` +
                            `"${qc.status}","${qc.reason}"\n`;
                 });
             });
@@ -986,26 +1802,40 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             document.body.appendChild(link); link.click(); document.body.removeChild(link);
         }
 
-        populateSelectors();
-        (function () {
-            const q = new URLSearchParams(window.location.search);
-            if (q.has('seg')) { currentSegIdx = Math.min(segments_data.length - 1, Math.max(0, parseInt(q.get('seg')))); document.getElementById('segment_select').value = currentSegIdx; }
-            if (q.has('run') && segments_data[0].orientations["-1"].runs[q.get('run')]) { currentRun = q.get('run'); document.getElementById('run_select').value = currentRun; }
-            if (q.has('pol')) {
-                const p = parseInt(q.get('pol'));
-                if (p === 1 || p === -1) userPolarityOverride[currentSegIdx] = p;
+        try {
+            populateSelectors();
+            (function () {
+                const q = new URLSearchParams(window.location.search);
+                if (q.has('seg')) { currentSegIdx = Math.min(segments_data.length - 1, Math.max(0, parseInt(q.get('seg')))); document.getElementById('segment_select').value = currentSegIdx; }
+                if (q.has('run') && segments_data[0] && segments_data[0].orientations && segments_data[0].orientations["-1"] && segments_data[0].orientations["-1"].runs && segments_data[0].orientations["-1"].runs[q.get('run')]) {
+                    currentRun = q.get('run');
+                    document.getElementById('run_select').value = currentRun;
+                }
+                if (q.has('pol')) {
+                    const p = parseInt(q.get('pol'));
+                    if (p === 1 || p === -1) userPolarityOverride[currentSegIdx] = p;
+                }
+                if (q.get('rej') === '1') document.getElementById('chk_rejected').checked = true;
+                if (q.get('raw') === '1') document.getElementById('chk_raw').checked = true;
+            })();
+            renderPlot();
+        } catch (err) {
+            console.error("Initialization error:", err);
+            const eb = document.getElementById("client_error_banner");
+            if (eb) {
+                eb.style.display = "block";
+                eb.innerHTML = `⚠️ <b>Error initializing review report:</b> ${err.message}<br><small>${err.stack || ""}</small>`;
             }
-            if (q.get('rej') === '1') document.getElementById('chk_rejected').checked = true;
-            if (q.get('raw') === '1') document.getElementById('chk_raw').checked = true;
-        })();
-        renderPlot();
+        }
     </script>
 </body>
 </html>
 """
 
 
-def generate_html(segments_data, source_workbook, out_path, default_run="default", workbook_path=None, config=None):
+def generate_html(segments_data, source_workbook, out_path, default_run="default", workbook_path=None, config=None, segment_rejections=None):
+    if not segments_data:
+        raise ValueError(f"Cannot generate HTML review report for '{source_workbook}': segments_data is empty (zero segments extracted).")
     runs_available = list(segments_data[0]["runs"].keys()) if segments_data and "runs" in segments_data[0] else []
     if default_run not in runs_available and runs_available:
         default_run = runs_available[0]
@@ -1025,6 +1855,7 @@ def generate_html(segments_data, source_workbook, out_path, default_run="default
     html = html.replace("__SHA256__", str(sha256))
     html = html.replace("__DEFAULT_RUN__", default_run)
     html = html.replace("__POLARITY_MODE__", polarity_mode_str)
+    html = html.replace("__SEGMENT_REJECTIONS__", json.dumps(segment_rejections or {}, allow_nan=False))
 
     # Embed Plotly JS for strictly offline use
     plotly_js = None
@@ -1063,12 +1894,57 @@ def generate_html(segments_data, source_workbook, out_path, default_run="default
 
 def build_params_by_name(args) -> dict:
     runs = dict(STRICTNESS_PRESETS)
+    from pixel_counter.v2_detector import (
+        amplitude_strictness_to_amplitude,
+        separation_strictness_to_recovery,
+    )
+
+    sep_strict = getattr(args, "separation_strictness", None)
+    amp_strict = getattr(args, "amplitude_strictness", None)
+    def_params = STRICTNESS_PRESETS["default"]
+
+    rec = None
+    if sep_strict is not None:
+        rec = separation_strictness_to_recovery(sep_strict)
+    elif getattr(args, "min_rel_recovery", None) is not None:
+        rec = args.min_rel_recovery
+    else:
+        rec = def_params.min_rel_recovery
+
+    amp = None
+    if amp_strict is not None:
+        amp = amplitude_strictness_to_amplitude(amp_strict)
+    elif getattr(args, "min_rel_amplitude", None) is not None:
+        amp = args.min_rel_amplitude
+    else:
+        amp = def_params.min_rel_amplitude
+
+    snr = args.min_snr if getattr(args, "min_snr", None) is not None else def_params.min_snr
+
+    eff_sep_strict = float(sep_strict) if sep_strict is not None else 1.0
+    eff_amp_strict = float(amp_strict) if amp_strict is not None else 1.0
+
     custom = DetectorParams(
-        min_rel_amplitude=args.min_rel_amplitude if args.min_rel_amplitude is not None else STRICTNESS_PRESETS["default"].min_rel_amplitude,
-        min_rel_recovery=args.min_rel_recovery if args.min_rel_recovery is not None else STRICTNESS_PRESETS["default"].min_rel_recovery,
-        min_snr=args.min_snr if args.min_snr is not None else STRICTNESS_PRESETS["default"].min_snr,
+        min_rel_amplitude=amp,
+        min_rel_recovery=rec,
+        min_snr=snr,
+        separation_strictness=eff_sep_strict,
+        amplitude_strictness=eff_amp_strict,
     ).validate()
-    if custom != STRICTNESS_PRESETS["default"]:
+
+    is_custom = (
+        sep_strict is not None
+        or amp_strict is not None
+        or getattr(args, "min_rel_amplitude", None) is not None
+        or getattr(args, "min_rel_recovery", None) is not None
+        or getattr(args, "min_snr", None) is not None
+    ) and (
+        abs(custom.min_rel_amplitude - def_params.min_rel_amplitude) > 1e-6
+        or abs(custom.min_rel_recovery - def_params.min_rel_recovery) > 1e-6
+        or abs(custom.min_snr - def_params.min_snr) > 1e-6
+    )
+
+    if is_custom:
         # the custom run is listed first and is the selected one
         runs = {"custom": custom, **runs}
     return runs
@@ -1078,6 +1954,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Cytocypher v2 contraction review utility")
     parser.add_argument("input_file", help="Path to input Excel workbook")
     parser.add_argument("--output", default="v2_validation_review.html", help="Path to output HTML report")
+    parser.add_argument("--separation-strictness", type=float, default=None,
+                        help="Continuous separation strictness in [0.0, 2.0] (default 1.0 -> rho=0.50)")
+    parser.add_argument("--amplitude-strictness", type=float, default=None,
+                        help="Continuous amplitude strictness in [0.0, 2.0] (default 1.0 -> alpha=0.50)")
     parser.add_argument("--min-rel-amplitude", type=float, default=None,
                         help="alpha in (0,1): a contraction must be >= alpha x typical major amplitude (default 0.50)")
     parser.add_argument("--min-rel-recovery", type=float, default=None,
@@ -1101,19 +1981,28 @@ def main(argv=None):
 
     try:
         overrides = {}
-        if args.overrides:
-            overrides.update(load_polarity_overrides(args.input_file, args.overrides, strict_hash=False))
+        segment_rejections = {}
+        ov_path = Path(args.overrides) if args.overrides else (default_overrides_path(args.input_file) if args.input_file else None)
+        if ov_path and ov_path.exists():
+            try:
+                overrides.update(load_polarity_overrides(args.input_file, ov_path, strict_hash=False))
+                segment_rejections.update(load_segment_rejections(args.input_file, ov_path))
+                print(f"Loaded sidecar: {len(overrides)} polarity overrides, {len(segment_rejections)} segment rejections from {ov_path.name}")
+            except Exception as e:
+                print(f"Warning: Could not load overrides from {ov_path.name}: {e}")
         if args.override_polarity:
             overrides.update(parse_polarity_override_str(args.override_polarity))
         if args.save_overrides:
-            saved_p = save_polarity_overrides(args.input_file, overrides, args.save_overrides)
-            print(f"Saved polarity overrides to {saved_p}")
+            saved_p = save_polarity_overrides(args.input_file, overrides, args.save_overrides, segment_rejections=segment_rejections)
+            print(f"Saved polarity overrides and rejections to {saved_p}")
 
         params_by_name = build_params_by_name(args)
         config = replace(
             BeatCounterConfig(),
             v2_polarity_mode=args.polarity,
             v2_use_calcium_polarity=args.use_calcium_polarity,
+            v2_separation_strictness=args.separation_strictness if args.separation_strictness is not None else 1.0,
+            v2_amplitude_strictness=args.amplitude_strictness if args.amplitude_strictness is not None else 1.0,
         )
 
         if args.inspect_polarity:
@@ -1135,6 +2024,7 @@ def main(argv=None):
             default_run="custom" if "custom" in params_by_name else "default",
             workbook_path=args.input_file,
             config=config,
+            segment_rejections=segment_rejections,
         )
 
         print("\nINSTRUCTIONS:")

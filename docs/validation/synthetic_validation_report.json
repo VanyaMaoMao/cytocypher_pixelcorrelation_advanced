@@ -1,7 +1,7 @@
 {
   "is_synthetic": true,
   "tolerance_s": 0.05,
-  "v2_config": "auto, no_two_pass",
+  "v2_config": "auto polarity, default strictness (alpha=0.5, rho=0.5, snr=8)",
   "recordings": {
     "synthetic_1hz_clean": {
       "true_count": 9,
@@ -78,7 +78,7 @@
           "is_half_freq": false
         },
         "polarity_correct": true,
-        "qc_status": "REVIEW"
+        "qc_status": "PASS"
       }
     },
     "synthetic_gap_1hz": {
@@ -142,16 +142,16 @@
       },
       "v2": {
         "metrics": {
-          "precision": 0.8333333333333334,
+          "precision": 1.0,
           "recall": 1.0,
-          "f1": 0.9090909090909091,
+          "f1": 1.0,
           "tp": 10,
-          "fp": 2,
+          "fp": 0,
           "fn": 0,
-          "count_error": 2,
-          "abs_count_error": 2,
-          "hz_error": 0.09999999999999998,
-          "bpm_error": 5.999999999999998,
+          "count_error": 0,
+          "abs_count_error": 0,
+          "hz_error": 0.0,
+          "bpm_error": 0.0,
           "is_double_freq": false,
           "is_half_freq": false
         },
@@ -171,11 +171,11 @@
   },
   "v2_aggregated": {
     "tp": 42,
-    "fp": 2,
+    "fp": 0,
     "fn": 0,
-    "precision": 0.9545454545454546,
+    "precision": 1.0,
     "recall": 1.0,
-    "f1": 0.9767441860465117,
-    "abs_count_error": 2
+    "f1": 1.0,
+    "abs_count_error": 0
   }
 }

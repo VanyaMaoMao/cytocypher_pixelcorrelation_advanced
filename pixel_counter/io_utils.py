@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,8 @@ import numpy as np
 import pandas as pd
 
 from .results import AFCEvent, AFCSegmentReviewDecision, AFCReviewSession
+
+logger = logging.getLogger(__name__)
 
 def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optional[str] = None) -> Tuple[pd.DataFrame, List[str], float, float]:
     if isinstance(file_path, pd.ExcelFile):
@@ -62,6 +65,32 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
             fs = 250.0  # Documented metadata source fallback
     else:
         fs = 250.0
+
+    # Cross-validate declared Sampling Frequency against row timestamps if present
+    implied_fs_candidates = []
+    if "Begin" in df.columns and "End" in df.columns:
+        begins = pd.to_numeric(df["Begin"], errors="coerce")
+        ends = pd.to_numeric(df["End"], errors="coerce")
+        for i in range(len(df)):
+            b = begins.iloc[i]
+            e = ends.iloc[i]
+            if pd.notna(b) and pd.notna(e) and (e - b) > 0.05:
+                row_vals = pd.to_numeric(df.iloc[i][y_cols], errors="coerce").values
+                valid_n = int(np.sum(np.isfinite(row_vals)))
+                if valid_n > 10:
+                    implied_fs_candidates.append((valid_n - 1) / (e - b))
+
+    if implied_fs_candidates:
+        med_implied = float(np.median(implied_fs_candidates))
+        consistent_rows = [f for f in implied_fs_candidates if abs(f - med_implied) / med_implied < 0.01]
+        if len(consistent_rows) >= 2 and abs(fs - med_implied) > 1.0:
+            corrected_fs = float(round(med_implied)) if abs(med_implied - round(med_implied)) < 0.05 else float(med_implied)
+            logger.warning(
+                "Declared Sampling Frequency (%s) in sheet %r conflicts with consistent row-timestamp implied fs (%.2f). Using implied fs %s.",
+                fs, sheet_name, med_implied, corrected_fs
+            )
+            fs = corrected_fs
+
 
     # 3. Parse Sample ID
     sample_id_col = next((c for c in df.columns if str(c).strip().lower() == "sample id"), None)

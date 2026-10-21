@@ -467,25 +467,36 @@ def build_concatenated_signal(
     begin_vals = np.array([entry["begin"] for entry in row_entries], dtype=float)
     use_begin_end = bool(np.isfinite(begin_vals).all())
 
-    # 1. Establish anchor
+    # 1. Establish anchor strictly from source Begin timestamps (no speculative row shifting)
+    row_duration_mismatch_rows: List[int] = []
     if use_begin_end:
         for entry in row_entries:
             tr = entry["trace"]
             valid_idx = np.where(np.isfinite(tr))[0]
             if len(valid_idx) > 0:
-                first_valid = valid_idx[0]
+                first_valid = int(valid_idx[0])
+                valid_vals = tr[valid_idx]
             else:
                 first_valid = 0
+                valid_vals = np.array([], dtype=float)
 
-            # Anchor timestamp corresponds to the first valid value.
-            entry["true_time_origin"] = float(entry["begin"]) - (first_valid / fs)
+            raw_begin = float(entry["begin"])
+            raw_end = float(entry["end"])
+            expected_dur = (len(valid_vals) - 1) / fs if len(valid_vals) > 1 else 0.0
+            declared_dur = (raw_end - raw_begin) if (np.isfinite(raw_end) and np.isfinite(raw_begin)) else expected_dur
+            if abs(declared_dur - expected_dur) > 0.05:
+                row_duration_mismatch_rows.append(int(entry["row_idx"]))
 
+            # Anchor timestamp corresponds to the first valid value of the source row.
+            entry["true_time_origin"] = float(raw_begin) - (first_valid / fs)
+
+        min_origin = float(min(e["true_time_origin"] for e in row_entries))
         for entry in row_entries:
-            start_idx = int(round((entry["true_time_origin"]) * fs))
+            start_idx = int(round((entry["true_time_origin"] - min_origin) * fs))
             entry["start_idx"] = start_idx
 
         global_start_idx = int(np.min([e["start_idx"] for e in row_entries]))
-        global_begin = float(global_start_idx / fs)
+        global_begin = float(min_origin + (global_start_idx / fs))
 
         for entry in row_entries:
             entry["end_idx"] = int(entry["start_idx"] + len(entry["trace"]))
@@ -513,7 +524,11 @@ def build_concatenated_signal(
         return np.array([], dtype=float), [], meta
 
     stitched = np.full(n_global, np.nan, dtype=float)
+    provenance_row = np.full(n_global, -1, dtype=int)
+    provenance_col = np.full(n_global, -1, dtype=int)
+    conflict_mask = np.zeros(n_global, dtype=bool)
     overlap_samples = []
+    identical_overlap_count = 0
     conflict_indices_global = []
 
     # Sort by time to place correctly
@@ -525,12 +540,15 @@ def build_concatenated_signal(
         s = int(s_abs - global_start_idx)
         e = int(e_abs - global_start_idx)
         tr = np.asarray(entry["trace"], dtype=float).copy()
+        r_idx_src = int(entry["row_idx"])
+        col_indices = np.arange(tr.size, dtype=int)
 
         if tr.size == 0 or e <= s:
             continue
 
         valid_mask = np.isfinite(tr)
         target_valid = np.isfinite(stitched[s:e])
+        already_conflicted = conflict_mask[s:e]
         conflict = valid_mask & target_valid
 
         if np.any(conflict):
@@ -540,7 +558,8 @@ def build_concatenated_signal(
             new_vals = tr[conflict]
 
             # Check for mismatches between overlapping samples
-            mismatch = ~np.isclose(existing_vals, new_vals, equal_nan=True)
+            mismatch = ~np.isclose(existing_vals, new_vals, atol=1e-4, rtol=1e-3, equal_nan=True)
+            identical_overlap_count += int(np.sum(~mismatch))
 
             if np.any(mismatch):
                 # Calculate global positions of the mismatches
@@ -548,14 +567,22 @@ def build_concatenated_signal(
                 global_positions = s + conflict_positions_in_slice
                 conflict_indices_global.extend(global_positions.tolist())
 
-                # Assign NaN to genuinely conflicting overlapping samples
-                stitched[s + conflict_positions_in_slice] = np.nan
+                # Permanently mask genuinely conflicting overlapping samples as NaN
+                stitched[global_positions] = np.nan
+                provenance_row[global_positions] = -1
+                provenance_col[global_positions] = -1
+                conflict_mask[global_positions] = True
 
-            # Place non-conflicting new values
-            place_new = valid_mask & ~target_valid
+            # Place non-conflicting new values without overwriting previously masked conflicts
+            place_new = valid_mask & ~target_valid & ~already_conflicted
             stitched[s:e][place_new] = tr[place_new]
+            provenance_row[s:e][place_new] = r_idx_src
+            provenance_col[s:e][place_new] = col_indices[place_new]
         else:
-            stitched[s:e][valid_mask] = tr[valid_mask]
+            place_new = valid_mask & ~already_conflicted
+            stitched[s:e][place_new] = tr[place_new]
+            provenance_row[s:e][place_new] = r_idx_src
+            provenance_col[s:e][place_new] = col_indices[place_new]
 
     valid = np.isfinite(stitched)
     if not np.any(valid):
@@ -565,6 +592,13 @@ def build_concatenated_signal(
     first_valid = int(np.argmax(valid))
     last_valid = int(len(valid) - np.argmax(valid[::-1]))
     stitched = stitched[first_valid:last_valid]
+    provenance_row = provenance_row[first_valid:last_valid]
+    provenance_col = provenance_col[first_valid:last_valid]
+    trimmed_conflicts = sorted(
+        int(idx - first_valid)
+        for idx in set(conflict_indices_global)
+        if first_valid <= idx < last_valid
+    )
 
     gap_mask = ~np.isfinite(stitched)
     internal_gap_count = int(np.sum(gap_mask))
@@ -597,12 +631,14 @@ def build_concatenated_signal(
 
     median_overlap = float(np.median(overlap_samples)) if overlap_samples else 0.0
     time_origin_s = float(global_begin + (first_valid / fs))
+    n_unique_conflicts = int(len(set(conflict_indices_global)))
     meta.update(
         {
             "stitch_mode": "strict_time_aligned",
             "stitch_used_begin_end": bool(use_begin_end),
             "stitch_global_begin": float(global_begin),
             "stitch_median_overlap_samples": float(median_overlap),
+            "stitch_identical_overlap_samples": int(identical_overlap_count),
             "stitch_rows": int(len(row_entries)),
             "stitch_internal_gap_samples": int(internal_gap_count),
             "stitched_gap_ranges_samples": stitched_gap_ranges_samples,
@@ -611,6 +647,13 @@ def build_concatenated_signal(
             "time_origin_s": float(time_origin_s),
             "stitch_overlap_conflicts": int(len(conflict_indices_global)),
             "stitch_overlap_conflict_indices": conflict_indices_global,
+            "stitch_trimmed_conflict_indices": trimmed_conflicts,
+            "stitch_conflicts_masked": True,
+            "stitch_conflict_fraction": float(n_unique_conflicts / max(1, stitched.size)),
+            "stitch_row_timestamp_shifts_corrected": 0,
+            "stitch_row_duration_mismatch_rows": row_duration_mismatch_rows,
+            "stitch_provenance_row": provenance_row,
+            "stitch_provenance_col": provenance_col,
         }
     )
     return stitched, seg_meta, meta

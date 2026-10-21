@@ -10,18 +10,18 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 
 ## Evaluation Parameters
 - **Tolerance (s):** 0.05
-- **V2 Config:** `auto, no_two_pass`
+- **V2 Config:** `auto polarity, default strictness (alpha=0.5, rho=0.5, snr=8)`
 
 ## Overall Results Summary
 
 | Metric | Legacy Pipeline | V2 Pipeline |
 |---|---|---|
-| f1 | 0.2500 | 0.9767 |
-| precision | 0.2045 | 0.9545 |
+| f1 | 0.2500 | 1.0000 |
+| precision | 0.2045 | 1.0000 |
 | recall | 0.3214 | 1.0000 |
-| abs_count_error | 18 | 2 |
+| abs_count_error | 18 | 0 |
 | tp | 9 | 42 |
-| fp | 35 | 2 |
+| fp | 35 | 0 |
 | fn | 19 | 0 |
 
 ## Per-Recording Results
@@ -40,7 +40,7 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 | Version | F1 | Precision | Recall | TP | FP | FN | Count Error | Hz Error | Polarity Correct | QC |
 |---|---|---|---|---|---|---|---|---|---|---|
 | legacy | 0.0000 | 0.0000 | 0.0000 | 0 | 18 | 19 | -1 | -0.1000 | N/A | ERROR/REJECT |
-| v2 | 1.0000 | 1.0000 | 1.0000 | 19 | 0 | 0 | 0 | 0.0000 | True | REVIEW |
+| v2 | 1.0000 | 1.0000 | 1.0000 | 19 | 0 | 0 | 0 | 0.0000 | True | PASS |
 
 ### Recording: synthetic_gap_1hz
 - True Event Count: 4
@@ -56,4 +56,5 @@ Scientific validation of the v2 detector is BLOCKED. The detector is NOT validat
 | Version | F1 | Precision | Recall | TP | FP | FN | Count Error | Hz Error | Polarity Correct | QC |
 |---|---|---|---|---|---|---|---|---|---|---|
 | legacy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | NOT_EVALUABLE |
-| v2 | 0.9091 | 0.8333 | 1.0000 | 10 | 2 | 0 | 2 | 0.1000 | True | PASS |
+| v2 | 1.0000 | 1.0000 | 1.0000 | 10 | 0 | 0 | 0 | 0.0000 | True | PASS |
+
