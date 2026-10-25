@@ -25,6 +25,11 @@ import numpy as np
 import pandas as pd
 
 from pixel_counter.analysis import analyze_v2_pipeline
+from pixel_counter.calcium_detector import (
+    CALCIUM_STRICTNESS_PRESETS,
+    CalciumDetectorParams,
+    analyze_calcium_pipeline,
+)
 from pixel_counter.config import BeatCounterConfig
 from pixel_counter.io_utils import extract_sample_id_from_segment_sheet, load_cytocypher_excel
 from pixel_counter.polarity_overrides import (
@@ -69,6 +74,51 @@ def _events_payload(v2_res):
     }
 
 
+def _calcium_run_payload(cal_run_dict):
+    ev = cal_run_dict["events"]
+    p = cal_run_dict["params"]
+    qc_meta = cal_run_dict.get("qc_meta", {})
+    n_ev = len(ev) if ev is not None else 0
+    return {
+        "params": {
+            "min_height": p.min_height,
+            "min_norm_height": p.min_norm_height,
+            "min_prominence_sigma": p.min_prominence_sigma,
+            "min_prominence_abs": p.min_prominence_abs,
+            "min_recovery": p.min_recovery,
+            "min_separation_s": p.min_separation_s,
+        },
+        "qc_status": cal_run_dict.get("qc_status", "UNKNOWN"),
+        "qc_reason": cal_run_dict.get("qc_reason", ""),
+        "signal_quality_category": cal_run_dict.get("qc_reason", ""),
+        "analyzable_duration_s": _num(qc_meta.get("analyzable_duration_s")),
+        "frequency_hz": _num(cal_run_dict.get("frequency_hz")),
+        "frequency_bpm": _num(cal_run_dict.get("frequency_bpm")),
+        "noise_sigma": _num(cal_run_dict.get("raw_noise_sigma", qc_meta.get("noise_sigma"))),
+        "amplitude_threshold": _num(cal_run_dict.get("stage1_amplitude_criterion", cal_run_dict.get("effective_amplitude_threshold", p.min_norm_height))),
+        "stage1_amplitude_criterion": _num(cal_run_dict.get("stage1_amplitude_criterion")),
+        "reference_amplitude": _num(cal_run_dict.get("reference_amplitude")),
+        "effective_prominence": _num(cal_run_dict.get("effective_prominence")),
+        "prominence_noise_floor": _num(cal_run_dict.get("prominence_noise_floor")),
+        "n_stage1_accepted": cal_run_dict.get("n_stage1_accepted"),
+        "n_stage2_recovered": cal_run_dict.get("n_stage2_recovered"),
+        "events": {
+            "index": [int(i) for i in ev["peak_index"]] if n_ev else [],
+            "time_s": [float(t) for t in ev["time_s"]] if n_ev else [],
+            "amplitude": [_num(a) for a in ev["amplitude"]] if n_ev else [],
+            "delta_r": [_num(dr) for dr in ev["delta_r"]] if (n_ev and "delta_r" in ev.columns) else [],
+            "raw_value": [_num(r) for r in ev["peak_raw_value"]] if n_ev else [],
+            "local_baseline": [_num(b) for b in ev["local_baseline_value"]] if n_ev else [],
+            "fwhm_s": [_num(w) for w in ev["fwhm_s"]] if n_ev else [],
+            "status": [str(s) for s in ev["status"]] if n_ev else [],
+            "reason": [str(s) for s in ev["reason"]] if n_ev else [],
+            "diagnostic_status": [str(s) for s in ev["status"]] if n_ev else [],
+            "diagnostic_reason": [str(s) for s in ev["reason"]] if n_ev else [],
+            "detection_stage": [str(ds) for ds in ev["detection_stage"]] if (n_ev and "detection_stage" in ev.columns) else (["stage1" if s == "ACCEPTED" else "none" for s in ev["status"]] if n_ev else []),
+        }
+    }
+
+
 def _run_payload(v2_res):
     md = v2_res["metadata"]
     return {
@@ -100,19 +150,14 @@ def process_workbook(
     segments=None,
     polarity_overrides: Optional[Dict[int, int]] = None,
     inspect_only: bool = False,
+    analysis_mode: str = "pixel",
 ):
-    """Run the v2 pipeline on every PixelCorrelation segment of ``file_path``.
+    """Run the v2 pipeline on segments of ``file_path``.
 
-    Implements the two-stage polarity workflow:
-      Stage 1: Determine polarity for every segment, verify evidence, log summary table.
-      Stage 2: Execute full contraction analysis with effective polarity and precalculate
-               both orientations (+1 and -1) for interactive offline review.
-
-    params_by_name     : dict name -> DetectorParams (default: the strictness presets)
-    config             : BeatCounterConfig
-    segments           : optional iterable of segment numbers to restrict the run
-    polarity_overrides : optional dict segment_number -> (+1 or -1) manual orientation
-    inspect_only       : if True, runs Stage 1 and returns without generating full output
+    Supported analysis modes:
+      'pixel' (default) : PixelCorrelation mechanical contraction analysis only.
+      'calcium'         : RatioMetricCalcium fluorescence transient analysis only.
+      'pixel-calcium'   : Synchronized dual-channel analysis with independent time axes.
     """
     wb_path = Path(file_path)
     if not wb_path.exists():
@@ -121,18 +166,99 @@ def process_workbook(
     params_by_name = params_by_name or dict(STRICTNESS_PRESETS)
     config = config or BeatCounterConfig()
     polarity_overrides = dict(polarity_overrides or {})
-    print(f"Loading {file_path}...")
+    print(f"Loading {file_path} (mode: {analysis_mode})...")
     xl = pd.ExcelFile(wb_path)
-
-    corr_sheets = [s for s in xl.sheet_names if "PixelCorrelation" in s and "Segment" in s]
-    if not corr_sheets:
-        raise ValueError(f"No PixelCorrelation segment sheets found in workbook: {wb_path.name}")
 
     def get_seg_num(s):
         try:
-            return int(s.split("Segment")[-1].strip())
+            return int(s.split("Segment")[-1].replace("_", "").strip())
         except ValueError:
             return 9999
+
+    # -------------------------------------------------------------------------
+    # MODE 1: CALCIUM-ONLY ANALYSIS
+    # -------------------------------------------------------------------------
+    if analysis_mode == "calcium":
+        cal_sheets = [s for s in xl.sheet_names if "RatioMetricCalcium" in s and "Segment" in s]
+        if not cal_sheets:
+            raise ValueError(f"No RatioMetricCalcium segment sheets found in workbook: {wb_path.name}")
+        cal_sheets = sorted(cal_sheets, key=get_seg_num)
+        if segments:
+            cal_sheets = [s for s in cal_sheets if get_seg_num(s) in segments]
+
+        print(f"Executing CALCIUM analysis on {len(cal_sheets)} segments...")
+        segments_data = []
+        for cal_sheet in cal_sheets:
+            seg_num = get_seg_num(cal_sheet)
+            df_cal, y_cols_cal, fs_cal, _ = load_cytocypher_excel(file_path, sheet_name=cal_sheet)
+            sample_id = extract_sample_id_from_segment_sheet(file_path, cal_sheet)
+            sig_cal, _, meta_cal = build_concatenated_signal(df_cal, y_cols_cal, fs_cal, config, force_invert=False)
+            t0_cal = float(meta_cal.get("time_origin_s", 0.0))
+
+            res_cal = analyze_calcium_pipeline(sig_cal, fs_cal, t0=t0_cal)
+            runs = {
+                "default": _calcium_run_payload(res_cal["runs"]["default"]),
+                "permissive": _calcium_run_payload(res_cal["runs"]["permissive"]),
+                "strict": _calcium_run_payload(res_cal["runs"]["strict"]),
+            }
+            def_run = runs["default"]
+            wf_amp = res_cal.get("signal_norm")
+            if wf_amp is None and res_cal["baseline"] is not None and len(res_cal["baseline"]):
+                wf_amp = (sig_cal - res_cal["baseline"]) / np.maximum(0.05, res_cal["baseline"])
+
+            orientations = {
+                "1": {
+                    "amplitude_b64": b64_encode_array(wf_amp) if wf_amp is not None else None,
+                    "baseline_raw_b64": b64_encode_array(res_cal["baseline"]) if res_cal["baseline"] is not None else None,
+                    "runs": runs,
+                    "qc_status": res_cal["qc_status"],
+                    "qc_reason": res_cal["qc_reason"],
+                    "n_accepted": int(np.sum(res_cal["events"]["status"] == "ACCEPTED")) if res_cal["qc_status"] == "PASS" else 0,
+                }
+            }
+
+            segments_data.append({
+                "sheet_name": cal_sheet,
+                "segment_number": seg_num,
+                "sample_id": str(sample_id) if pd.notna(sample_id) else "",
+                "channel": "RatioMetricCalcium",
+                "analysis_mode": "calcium",
+                "fs": float(fs_cal),
+                "t0": t0_cal,
+                "length": int(len(sig_cal)),
+                "qc_status": def_run["qc_status"],
+                "qc_reason": def_run["qc_reason"],
+                "raw_polarity": 1,
+                "polarity_source": "calcium_positive",
+                "polarity_method": "fixed_positive",
+                "polarity_reason": "calcium transients are positive excursions (F >= F0)",
+                "auto_polarity": 1,
+                "auto_method": "fixed_positive",
+                "auto_reason": "calcium transients are positive excursions",
+                "effective_polarity": 1,
+                "has_amplitude": True if wf_amp is not None else False,
+                "sig_raw_b64": b64_encode_array(sig_cal),
+                "baseline_raw_b64": b64_encode_array(res_cal["baseline"]) if res_cal["baseline"] is not None else None,
+                "amplitude_b64": b64_encode_array(wf_amp) if wf_amp is not None else None,
+                "sig_cal_b64": b64_encode_array(sig_cal),
+                "t0_cal": t0_cal,
+                "fs_cal": float(fs_cal),
+                "length_cal": int(len(sig_cal)),
+                "cal_status": "loaded",
+                "cal_note": None,
+                "runs": runs,
+                "orientations": orientations,
+                "cal_runs": runs,
+                "cal_metadata": res_cal["metadata"],
+            })
+        return segments_data, Path(file_path).name
+
+    # -------------------------------------------------------------------------
+    # MODE 2 & 3: PIXELCORRELATION AND PIXEL-CALCIUM DUAL ANALYSIS
+    # -------------------------------------------------------------------------
+    corr_sheets = [s for s in xl.sheet_names if "PixelCorrelation" in s and "Segment" in s]
+    if not corr_sheets:
+        raise ValueError(f"No PixelCorrelation segment sheets found in workbook: {wb_path.name}")
 
     corr_sheets.sort(key=get_seg_num)
     if segments:
@@ -173,9 +299,17 @@ def process_workbook(
                     "fs": float(fs_o),
                     "t0": float(t0_o),
                     "length": int(len(sig_o)),
+                    "error": None,
                 }
             except Exception as e:
-                return None
+                print(f"  [AUX] Note: Sheet {sheet!r} found in workbook but could not be loaded as a valid time series: {e}")
+                return {
+                    "signal": None,
+                    "fs": None,
+                    "t0": None,
+                    "length": 0,
+                    "error": str(e),
+                }
 
         aux_cal = load_aux_channel("RatioMetricCalcium")
         aux_int = load_aux_channel("PixelIntensity")
@@ -286,10 +420,25 @@ def process_workbook(
         sig_int = aux_int["signal"] if aux_int else None
         sig_cal = aux_cal["signal"] if aux_cal else None
 
+        cal_runs_payload = None
+        cal_meta_payload = None
+        baseline_cal_b64 = None
+        if analysis_mode == "pixel-calcium" and sig_cal is not None and len(sig_cal) > 0:
+            cal_res = analyze_calcium_pipeline(sig_cal, aux_cal["fs"], t0=aux_cal["t0"])
+            cal_runs_payload = {
+                "default": _calcium_run_payload(cal_res["runs"]["default"]),
+                "permissive": _calcium_run_payload(cal_res["runs"]["permissive"]),
+                "strict": _calcium_run_payload(cal_res["runs"]["strict"]),
+            }
+            cal_meta_payload = cal_res["metadata"]
+            baseline_cal_b64 = b64_encode_array(cal_res["baseline"])
+
         segments_data.append({
             "sheet_name": corr_sheet,
             "segment_number": seg_num,
             "sample_id": str(sample_id) if pd.notna(sample_id) else "",
+            "channel": "PixelCorrelation",
+            "analysis_mode": analysis_mode,
             "fs": float(fs),
             "t0": t0,
             "length": int(len(sig_raw)),
@@ -312,11 +461,16 @@ def process_workbook(
             "fs_int": aux_int["fs"] if aux_int else None,
             "length_int": aux_int["length"] if aux_int else 0,
             "sig_cal_b64": b64_encode_array(sig_cal) if sig_cal is not None and len(sig_cal) else None,
+            "baseline_cal_b64": baseline_cal_b64,
             "t0_cal": aux_cal["t0"] if aux_cal else None,
             "fs_cal": aux_cal["fs"] if aux_cal else None,
             "length_cal": aux_cal["length"] if aux_cal else 0,
+            "cal_status": "loaded" if (sig_cal is not None and len(sig_cal)) else ("empty_sheet" if aux_cal and aux_cal.get("error") else "not_present"),
+            "cal_note": aux_cal.get("error") if aux_cal else None,
             "runs": runs,
             "orientations": orientations,
+            "cal_runs": cal_runs_payload,
+            "cal_metadata": cal_meta_payload,
         })
 
     return segments_data, Path(file_path).name
@@ -351,7 +505,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <h2>Cytocypher v2 Contraction Review</h2>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <h2 style="margin:0;">Cytocypher v2 Analysis Review</h2>
+        <span id="analysis_mode_badge" style="padding:5px 12px; border-radius:4px; font-weight:bold; font-size:13px; background:#198754; color:white;">MODE: __ANALYSIS_MODE__</span>
+    </div>
     <div class="info">Source: <span id="source_name"></span> &nbsp;|&nbsp; Polarity Mode: <span id="polarity_mode_badge" style="background:#e8f0fe; color:#1a73e8; padding:3px 8px; border-radius:4px; font-weight:bold;">__POLARITY_MODE__</span></div>
 
     <div class="controls">
@@ -485,6 +642,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     raw: decodeFloat32Array(s.sig_raw_b64),
                     inten: s.sig_int_b64 ? decodeFloat32Array(s.sig_int_b64) : null,
                     cal: s.sig_cal_b64 ? decodeFloat32Array(s.sig_cal_b64) : null,
+                    base_cal: s.baseline_cal_b64 ? decodeFloat32Array(s.baseline_cal_b64) : null,
                 };
             }
             return decodedSignals[segIdx];
@@ -514,14 +672,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function timesForCal(seg) {
-            if (!seg.t0_cal || !seg.fs_cal || !seg.length_cal) return timesFor(seg);
+            if (seg.t0_cal === null || seg.t0_cal === undefined || !seg.fs_cal || !seg.length_cal) return timesFor(seg);
             const t = new Float64Array(seg.length_cal);
             for (let i = 0; i < seg.length_cal; i++) t[i] = seg.t0_cal + i / seg.fs_cal;
             return t;
         }
 
         function timesForInt(seg) {
-            if (!seg.t0_int || !seg.fs_int || !seg.length_int) return timesFor(seg);
+            if (seg.t0_int === null || seg.t0_int === undefined || !seg.fs_int || !seg.length_int) return timesFor(seg);
             const t = new Float64Array(seg.length_int);
             for (let i = 0; i < seg.length_int; i++) t[i] = seg.t0_int + i / seg.fs_int;
             return t;
@@ -550,6 +708,43 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 return seg.runs[runName].events;
             }
             return {index: [], time_s: [], amplitude: [], raw_value: [], status: [], reason: [], diagnostic_status: [], diagnostic_reason: []};
+        }
+
+        const calAnnotations = {};
+
+        function getCalRunEvents(segIdx, runName) {
+            const seg = segments_data[segIdx];
+            if (seg.cal_runs && seg.cal_runs[runName]) {
+                return seg.cal_runs[runName].events;
+            }
+            return {index: [], time_s: [], amplitude: [], raw_value: [], status: [], reason: []};
+        }
+
+        function getCalAnn(segIdx, run) {
+            run = run || currentRun;
+            const key = segIdx + "|" + run;
+            if (!calAnnotations[key]) {
+                const seg = segments_data[segIdx];
+                const ev = getCalRunEvents(segIdx, run);
+                const list = (ev.index || []).map((idx, i) => ({
+                    cal_idx: i,
+                    index: idx,
+                    time_s: ev.time_s[i],
+                    amp: ev.amplitude[i],
+                    delta_r: ev.delta_r ? ev.delta_r[i] : null,
+                    base: ev.local_baseline ? ev.local_baseline[i] : null,
+                    raw: ev.raw_value[i],
+                    status: ev.status[i],
+                    original_status: ev.status[i],
+                    original_reason: ev.reason[i] || "",
+                    reason: ev.reason[i] || "",
+                    origin: "auto",
+                    manually_rejected: false,
+                    detection_stage: ev.detection_stage ? ev.detection_stage[i] : (ev.status[i] === "ACCEPTED" ? "stage1" : "none"),
+                }));
+                calAnnotations[key] = list;
+            }
+            return calAnnotations[key];
         }
 
         function findCandidateInRun(segIdx, polKey, runName, sampleIdx, tolSamples) {
@@ -686,9 +881,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const diagStatuses = ev.diagnostic_status || ev.status || [];
                 const diagReasons = ev.diagnostic_reason || ev.reason || [];
                 const list = ev.index.map((idx, i) => ({
-                    index: idx, time_s: ev.time_s[i], amp: ev.amplitude[i], raw: ev.raw_value[i],
+                    index: idx, time_s: ev.time_s[i], amp: ev.amplitude[i],
+                    delta_r: ev.delta_r ? ev.delta_r[i] : null,
+                    base: ev.local_baseline ? ev.local_baseline[i] : null,
+                    raw: ev.raw_value[i],
                     status: ev.status[i], original_status: ev.status[i], original_reason: ev.reason[i] || "",
                     reason: ev.reason[i] || "", origin: "auto", manually_rejected: false, per_peak_strictness: "inherit",
+                    detection_stage: ev.detection_stage ? ev.detection_stage[i] : (ev.status[i] === "ACCEPTED" ? "stage1" : "none"),
                     diagnostic_status: diagStatuses[i] || ev.status[i],
                     diagnostic_reason: diagReasons[i] || ev.reason[i] || ""
                 }));
@@ -704,6 +903,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                 original_reason: permEv.reason[i] || "below_global_strictness_threshold",
                                 reason: permEv.reason[i] || "below_global_strictness_threshold",
                                 origin: "auto", manually_rejected: false, per_peak_strictness: "inherit",
+                                detection_stage: permEv.detection_stage ? permEv.detection_stage[i] : "none",
                                 diagnostic_status: permDiagSt[i] || "REJECTED",
                                 diagnostic_reason: permEv.reason[i] || "below_global_strictness_threshold"
                             });
@@ -1118,7 +1318,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             const list = annotations[annK];
                             for (let i = list.length - 1; i >= 0; i--) {
                                 if (Math.abs(list[i].index - selIdx) <= w) {
-                                    if (list[i].origin === "manual" || list[i].original_status === "MISSING") {
+                                    if (list[i].original_status === "MISSING") {
                                         list.splice(i, 1);
                                     } else {
                                         list[i].status = list[i].original_status;
@@ -1205,7 +1405,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const strictTxt = `${strictVal} (${strictSource})`;
             const stateTxt = ev.status;
             const reasonTxt = ev.reason ? ` [Reason: ${ev.reason}]` : "";
-            lbl.innerHTML = `Selected: <b>t=${ev.time_s.toFixed(3)}s</b> | Amp=<b>${ev.amp == null ? "n/a" : ev.amp.toFixed(4)}</b> | Origin: <b>${originTxt}</b> | Strictness: <b>${strictTxt}</b> | State: <b>${stateTxt}</b>${reasonTxt ? ` | <b>${reasonTxt}</b>` : ""}`;
+            const stageTxt = (ev.detection_stage && ev.detection_stage !== "none") ? ` | Stage: <b>${ev.detection_stage}</b>` : "";
+            lbl.innerHTML = `Selected: <b>t=${ev.time_s.toFixed(3)}s</b> | Amp=<b>${ev.amp == null ? "n/a" : ev.amp.toFixed(4)}</b> | Origin: <b>${originTxt}</b> | Strictness: <b>${strictTxt}</b>${stageTxt} | State: <b>${stateTxt}</b>${reasonTxt ? ` | <b>${reasonTxt}</b>` : ""}`;
             sel.disabled = false;
             sel.value = isOverridden ? ev.per_peak_strictness : "inherit";
             if (btnRem) {
@@ -1329,9 +1530,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 qcHeaderTxt = `<span style="color:#28a745; font-weight:bold;">QC: PASS (${qc.reason})</span>`;
             }
 
+            let auxInfo = "";
+            if (seg.cal_runs && seg.cal_runs[currentRun]) {
+                const calR = seg.cal_runs[currentRun];
+                const calQCColor = calR.qc_status === "PASS" ? "#28a745" : "#dc3545";
+                const calRateStr = (calR.qc_status === "PASS" && calR.frequency_hz !== null) ? `${calR.frequency_hz.toFixed(2)} Hz (${calR.frequency_bpm.toFixed(1)} BPM)` : "N/A";
+                auxInfo += ` | <span style="font-weight:bold; color:firebrick;">Ca2+:</span> <span style="color:${calQCColor}; font-weight:bold;">${calR.qc_status} (${calR.qc_reason})</span>, Rate: ${calRateStr}`;
+            } else if (seg.length_cal && seg.length_cal > 0) {
+                auxInfo += ` | Calcium: ${seg.length_cal} pts`;
+            } else if (seg.cal_status === "empty_sheet") {
+                auxInfo += ` | <span style="color:#856404;" title="Workbook contains sheet but it contains 0 data observations">Calcium: [empty sheet in Excel]</span>`;
+            }
+            if (seg.length_int && seg.length_int > 0) {
+                auxInfo += ` | Intensity: ${seg.length_int} pts`;
+            }
+
             document.getElementById("segment_info").innerHTML =
                 `Sample ID: ${seg.sample_id} | ${seg.length} pts | fs: ${seg.fs} Hz | t0: ${seg.t0.toFixed(3)} s | ` +
-                `raw polarity: ${polTxt} | ${qcHeaderTxt}`;
+                `raw polarity: ${polTxt}${auxInfo} | ${qcHeaderTxt}`;
 
             const fb = document.getElementById("fail_box");
             if (qc.isManualRejection) {
@@ -1397,20 +1613,60 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ? run.amplitude_strictness.toFixed(2)
                 : ((p.amplitude_strictness !== undefined && p.amplitude_strictness !== null) ? p.amplitude_strictness.toFixed(2) : "1.00");
 
-            document.getElementById("param_box").innerText =
-                `Active detector parameters [${currentRun}]: strictness=(sep:${sepStrict}, amp:${ampStrict})  ` +
-                `min_rel_amplitude=${p.min_rel_amplitude || "0.50"}  ` +
-                `min_rel_recovery=${p.min_rel_recovery || "0.50"}  min_snr=${p.min_snr || "8"}  |  ` +
-                `reference amplitude=${run.reference_amplitude == null ? "n/a" : run.reference_amplitude.toFixed(4)}  ` +
-                `amplitude threshold=${run.amplitude_threshold == null ? "n/a" : run.amplitude_threshold.toFixed(4)}  ` +
-                `noise sigma=${run.noise_sigma == null ? "n/a" : run.noise_sigma.toExponential(2)}  |  ` +
-                `quality=${sigCat}  valid duration=${durTxt}  rate=${rateTxt}${exclTxt}`;
+            const isCalciumMode = (seg.analysis_mode === "calcium");
+
+            if (isCalciumMode) {
+                const s1Amp = (run.stage1_amplitude_criterion != null) ? run.stage1_amplitude_criterion.toFixed(4) : ((run.amplitude_threshold != null) ? run.amplitude_threshold.toFixed(4) : "n/a");
+                const refAmp = (run.reference_amplitude != null) ? run.reference_amplitude.toFixed(4) : "n/a";
+                const effProm = (run.effective_prominence != null) ? run.effective_prominence.toFixed(4) : "n/a";
+                const noiseSig = (run.noise_sigma != null) ? run.noise_sigma.toExponential(2) : "n/a";
+                const s1Acc = (run.n_stage1_accepted != null) ? run.n_stage1_accepted : "n/a";
+                const s2Rec = (run.n_stage2_recovered != null) ? run.n_stage2_recovered : "n/a";
+                const totalAcc = nAcc;
+
+                document.getElementById("param_box").innerText =
+                    `Active detector parameters [${currentRun}]: strictness=${currentRun}  |  ` +
+                    `ref_norm_amp=${refAmp} ΔR/R₀  |  ` +
+                    `Stage 1 criterion: amp ≥ ${s1Amp} ΔR/R₀, prom ≥ ${effProm}  ` +
+                    `noise σ_raw=${noiseSig}  |  ` +
+                    `Accepted: ${totalAcc} (Stage 1: ${s1Acc}, Stage 2: ${s2Rec})  |  ` +
+                    `quality=${sigCat}  valid duration=${durTxt}  rate=${rateTxt}${exclTxt}`;
+            } else {
+                let calParamTxt = "";
+                if (seg.cal_runs && seg.cal_runs[currentRun]) {
+                    const calR = seg.cal_runs[currentRun];
+                    const calMeta = seg.cal_metadata || calR.qc_meta || {};
+                    const calNoise = (calR.noise_sigma != null ? calR.noise_sigma : calMeta.noise_sigma) != null ? (calR.noise_sigma != null ? calR.noise_sigma : calMeta.noise_sigma).toExponential(2) : "n/a";
+                    const calDrop = calMeta.dropout_fraction != null ? `${(calMeta.dropout_fraction * 100).toFixed(1)}%` : "0%";
+                    const s1Amp = (calR.stage1_amplitude_criterion != null) ? calR.stage1_amplitude_criterion.toFixed(4) : ((calR.amplitude_threshold != null) ? calR.amplitude_threshold.toFixed(4) : "n/a");
+                    const s1Acc = calR.n_stage1_accepted != null ? calR.n_stage1_accepted : "n/a";
+                    const s2Rec = calR.n_stage2_recovered != null ? calR.n_stage2_recovered : "n/a";
+                    calParamTxt = `  |  Calcium [${currentRun}]: S1 amp ≥ ${s1Amp}  noise=${calNoise}  dropouts=${calDrop}  QC=${calR.qc_status} (${calR.qc_reason})  acc=${calR.n_accepted} (S1:${s1Acc}, S2:${s2Rec})`;
+                }
+
+                document.getElementById("param_box").innerText =
+                    `Active detector parameters [${currentRun}]: strictness=(sep:${sepStrict}, amp:${ampStrict})  ` +
+                    `min_rel_amplitude=${p.min_rel_amplitude || "0.50"}  ` +
+                    `min_rel_recovery=${p.min_rel_recovery || "0.50"}  min_snr=${p.min_snr || "8"}  |  ` +
+                    `reference amplitude=${run.reference_amplitude == null ? "n/a" : run.reference_amplitude.toFixed(4)}  ` +
+                    `amplitude threshold=${run.amplitude_threshold == null ? "n/a" : run.amplitude_threshold.toFixed(4)}  ` +
+                    `noise sigma=${run.noise_sigma == null ? "n/a" : run.noise_sigma.toExponential(2)}  |  ` +
+                    `quality=${sigCat}  valid duration=${durTxt}  rate=${rateTxt}${exclTxt}${calParamTxt}`;
+            }
 
             const panels = [];
-            if (hasAmp) panels.push({key: "amp", title: "Contraction amplitude A<br>(relative to resting baseline)", weight: 3});
-            if (showRaw) panels.push({key: "raw", title: "Raw PixelCorrelation", weight: 2});
+            if (hasAmp) panels.push({
+                key: "amp",
+                title: isCalciumMode ? "Calcium amplitude ΔR/R₀<br>(relative to resting baseline R₀)" : "Contraction amplitude A<br>(relative to resting baseline)",
+                weight: 3
+            });
+            if (showRaw) panels.push({
+                key: "raw",
+                title: isCalciumMode ? "Raw RatioMetricCalcium (R)" : "Raw PixelCorrelation",
+                weight: 2
+            });
             if (baseSig.inten) panels.push({key: "int", title: "PixelIntensity", weight: 1.2});
-            if (baseSig.cal) panels.push({key: "cal", title: "RatioMetricCalcium", weight: 1.2});
+            if (baseSig.cal && !isCalciumMode) panels.push({key: "cal", title: "RatioMetricCalcium (R)", weight: 1.2});
 
             const totalW = panels.reduce((s, q) => s + q.weight, 0);
             const gap = 0.04;
@@ -1424,24 +1680,88 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             const traces = [];
             if (P.amp && ampArr) {
-                traces.push({x: times, y: ampArr, mode: "lines", name: "amplitude", line: {color: "black", width: 1},
-                             yaxis: P.amp.ax, xaxis: "x", hoverinfo: "x+y"});
+                traces.push({x: times, y: ampArr, mode: "lines", name: isCalciumMode ? "ΔR/R₀ amplitude" : "amplitude", line: {color: "black", width: 1},
+                             yaxis: P.amp.ax, xaxis: "x", hoverinfo: "x+y", connectgaps: false});
                 traces.push({x: [times[0], times[times.length - 1]], y: [0, 0], mode: "lines",
-                             name: "resting baseline (A = 0)", line: {color: "gray", width: 1}, yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
+                             name: isCalciumMode ? "resting baseline (ΔR/R₀ = 0)" : "resting baseline (A = 0)", line: {color: "gray", width: 1}, yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
                 if (run.amplitude_threshold !== null && run.amplitude_threshold !== undefined) {
                     traces.push({x: [times[0], times[times.length - 1]], y: [run.amplitude_threshold, run.amplitude_threshold],
-                                 mode: "lines", name: "major-contraction threshold", line: {color: "orange", dash: "dash", width: 1.2},
+                                 mode: "lines", name: isCalciumMode ? "Stage 1 amplitude criterion (ΔR/R₀)" : "major-contraction threshold", line: {color: "orange", dash: "dash", width: 1.2},
                                  yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
                 }
             }
             if (P.raw) {
-                traces.push({x: times, y: baseSig.raw, mode: "lines", name: "raw PixelCorrelation", line: {color: "blue", width: 1},
-                             yaxis: P.raw.ax, xaxis: "x"});
-                if (baseArr) traces.push({x: times, y: baseArr, mode: "lines", name: "resting baseline B_raw",
+                traces.push({x: times, y: baseSig.raw, mode: "lines", name: isCalciumMode ? "Raw RatioMetricCalcium" : "raw PixelCorrelation", line: {color: isCalciumMode ? "firebrick" : "blue", width: 1},
+                             yaxis: P.raw.ax, xaxis: "x", connectgaps: false});
+                if (baseArr) traces.push({x: times, y: baseArr, mode: "lines", name: isCalciumMode ? "Resting baseline R₀" : "resting baseline B_raw",
                              line: {color: "gray", dash: "dot", width: 1.2}, yaxis: P.raw.ax, xaxis: "x", hoverinfo: "skip"});
             }
             if (P.int && baseSig.inten) traces.push({x: timesForInt(seg), y: baseSig.inten, mode: "lines", name: "PixelIntensity", line: {color: "green", width: 1}, yaxis: P.int.ax, xaxis: "x", connectgaps: false});
-            if (P.cal && baseSig.cal) traces.push({x: timesForCal(seg), y: baseSig.cal, mode: "lines", name: "RatioMetricCalcium", line: {color: "firebrick", width: 1}, yaxis: P.cal.ax, xaxis: "x", connectgaps: false});
+            if (P.cal && baseSig.cal) {
+                traces.push({x: timesForCal(seg), y: baseSig.cal, mode: "lines", name: "RatioMetricCalcium", line: {color: "firebrick", width: 1}, yaxis: P.cal.ax, xaxis: "x", connectgaps: false});
+                if (baseSig.base_cal) {
+                    traces.push({x: timesForCal(seg), y: baseSig.base_cal, mode: "lines", name: "Resting baseline R₀", line: {color: "gray", dash: "dot", width: 1.2}, yaxis: P.cal.ax, xaxis: "x", hoverinfo: "skip"});
+                }
+                if (seg.cal_runs) {
+                    const calList = getCalAnn(currentSegIdx, currentRun);
+                    const calR = seg.cal_runs[currentRun] || seg.cal_runs["default"];
+                    const calQC = calR ? calR.qc_status : "PASS";
+                    const calReason = calR ? calR.qc_reason : "";
+                    if (calQC !== "PASS") {
+                        if (showPrelimDiag) {
+                            const calDiag = calList.filter(a => a.status === "ACCEPTED" || a.original_status === "ACCEPTED");
+                            if (calDiag.length > 0) {
+                                traces.push({
+                                    x: calDiag.map(a => a.time_s), y: calDiag.map(a => a.raw),
+                                    customdata: calDiag.map(a => a.cal_idx),
+                                    text: calDiag.map(a => `t=${a.time_s.toFixed(3)} s<br>Ca2+ raw=${a.raw.toFixed(4)}<br>EXCLUDED (Calcium QC ${calQC}: ${calReason})`),
+                                    hoverinfo: "text", mode: "markers", name: "Calcium diagnostic candidates",
+                                    marker: {color: "#888888", size: 8, symbol: "circle-open"}, opacity: 0.65,
+                                    yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                                });
+                            }
+                        }
+                    } else {
+                        const calAutoAcc = calList.filter(a => a.status === "ACCEPTED" && a.origin !== "manual");
+                        const calManAcc = calList.filter(a => a.status === "ACCEPTED" && a.origin === "manual");
+                        const calManRej = calList.filter(a => a.status === "REJECTED" && a.manually_rejected);
+
+                        traces.push({
+                            x: calAutoAcc.map(a => a.time_s), y: calAutoAcc.map(a => a.raw),
+                            customdata: calAutoAcc.map(a => a.cal_idx),
+                            text: calAutoAcc.map(a => {
+                                let stg = "";
+                                if (a.detection_stage === "stage1") stg = " [Stage 1 primary]";
+                                else if (a.detection_stage && a.detection_stage.startsWith("stage2")) stg = ` [Stage 2 recovery: ${a.detection_stage}]`;
+                                return `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Calcium transient (accepted)${stg}`;
+                            }),
+                            hoverinfo: "text", mode: "markers", name: `Calcium accepted (${calAutoAcc.length})`,
+                            marker: {color: "#28a745", size: 10, symbol: "circle"},
+                            yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                        });
+                        if (calManAcc.length > 0) {
+                            traces.push({
+                                x: calManAcc.map(a => a.time_s), y: calManAcc.map(a => a.raw),
+                                customdata: calManAcc.map(a => a.cal_idx),
+                                text: calManAcc.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Manually added calcium peak (click to delete)`),
+                                hoverinfo: "text", mode: "markers", name: `Calcium manual (${calManAcc.length})`,
+                                marker: {color: "#007bff", size: 10, symbol: "circle", line: {color: "#004085", width: 1.5}},
+                                yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                            });
+                        }
+                        if (calManRej.length > 0) {
+                            traces.push({
+                                x: calManRej.map(a => a.time_s), y: calManRej.map(a => a.raw),
+                                customdata: calManRej.map(a => a.cal_idx),
+                                text: calManRej.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Rejected calcium transient (click to restore)`),
+                                hoverinfo: "text", mode: "markers", name: `Calcium rejected (${calManRej.length})`,
+                                marker: {color: "#dc3545", size: 10, symbol: "x", line: {color: "#a71d2a", width: 1.5}},
+                                yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                            });
+                        }
+                    }
+                }
+            }
 
             function customMarkerTrace(predicateFn, panelKey, yField, style, name) {
                 const pk = P[panelKey]; if (!pk) return;
@@ -1461,9 +1781,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     } else if (a.manually_rejected) {
                         sourceText = "MANUALLY REJECTED (was auto ACCEPTED — click red cross to restore to GREEN)" + strictTag;
                     } else {
-                        sourceText = a.status + (a.reason ? ": " + a.reason : "") + strictTag;
+                        let stageInfo = "";
+                        if (isCalciumMode && a.status === "ACCEPTED") {
+                            if (a.detection_stage === "stage1") {
+                                stageInfo = " [Stage 1 primary]";
+                            } else if (a.detection_stage && a.detection_stage.startsWith("stage2")) {
+                                stageInfo = ` [Stage 2 recovery: ${a.detection_stage}]`;
+                            }
+                        }
+                        sourceText = a.status + (a.reason ? ": " + a.reason : "") + stageInfo + strictTag;
                     }
-                    tx.push(`t=${a.time_s.toFixed(3)} s<br>A=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>${sourceText}`);
+                    const ampLabel = isCalciumMode ? `ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)})` : `A=${a.amp == null ? "n/a" : a.amp.toFixed(4)}`;
+                    tx.push(`t=${a.time_s.toFixed(3)} s<br>${ampLabel}<br>${sourceText}`);
                 });
                 traces.push(Object.assign({x: xs, y: ys, customdata: cd, text: tx, hoverinfo: "text", mode: "markers", name: name,
                                            yaxis: pk.ax, xaxis: "x", type: "scatter"}, style));
@@ -1557,9 +1886,93 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const el = document.getElementById("plot");
             el.removeAllListeners && el.removeAllListeners("plotly_click");
             el.on("plotly_click", function (data) {
-                if (isUndet || isQCFailed || qc.isManualRejection) return;
                 const pt = data.points[0];
                 const name = pt.data.name || "";
+
+                // Handle click on RatioMetricCalcium panel in dual-mode
+                if (P.cal && (pt.data.yaxis === P.cal.ax || name.startsWith("RatioMetricCalcium") || name.startsWith("Calcium"))) {
+                    if (!seg.cal_runs) return;
+                    const calList = getCalAnn(currentSegIdx, currentRun);
+                    const fsCal = seg.fs_cal || seg.fs;
+                    const t0Cal = (seg.t0_cal !== null && seg.t0_cal !== undefined) ? seg.t0_cal : seg.t0;
+                    const wCal = Math.max(1, Math.round(0.04 * fsCal));
+
+                    if (name.startsWith("Calcium accepted") || name.startsWith("Calcium rejected") || name.startsWith("Calcium manual")) {
+                        const targetCalIdx = pt.customdata;
+                        const a = calList.find(item => item.cal_idx === targetCalIdx) || calList.find(item => Math.abs(item.time_s - pt.x) <= 0.04);
+                        if (a) {
+                            if (a.origin === "manual") {
+                                // Delete manual peak across all runs
+                                ["default", "permissive", "strict"].forEach(rKey => {
+                                    const rList = getCalAnn(currentSegIdx, rKey);
+                                    const rmIdx = rList.findIndex(item => Math.abs(item.index - a.index) <= wCal);
+                                    if (rmIdx >= 0) rList.splice(rmIdx, 1);
+                                });
+                            } else if (a.manually_rejected) {
+                                // Restore rejected peak
+                                a.status = "ACCEPTED";
+                                a.manually_rejected = false;
+                                a.reason = a.original_reason || "";
+                            } else {
+                                // Reject accepted peak
+                                a.status = "REJECTED";
+                                a.manually_rejected = true;
+                                a.reason = "manually_rejected";
+                            }
+                            renderPlot();
+                            return;
+                        }
+                    } else if (name === "RatioMetricCalcium" && baseSig.cal) {
+                        // User clicked on the calcium line trace -> add a manual calcium peak
+                        const clickTime = pt.x;
+                        const approxIdx = Math.round((clickTime - t0Cal) * fsCal);
+                        const i0 = Math.max(0, approxIdx - wCal);
+                        const i1 = Math.min(baseSig.cal.length - 1, approxIdx + wCal);
+                        let bestIdx = approxIdx;
+                        let maxVal = -Infinity;
+                        for (let j = i0; j <= i1; j++) {
+                            if (baseSig.cal[j] > maxVal) {
+                                maxVal = baseSig.cal[j];
+                                bestIdx = j;
+                            }
+                        }
+                        const bestTime = t0Cal + bestIdx / fsCal;
+                        const existing = calList.find(item => Math.abs(item.index - bestIdx) <= wCal);
+                        if (existing) {
+                            if (existing.origin === "manual") {
+                                ["default", "permissive", "strict"].forEach(rKey => {
+                                    const rList = getCalAnn(currentSegIdx, rKey);
+                                    const rmIdx = rList.findIndex(item => Math.abs(item.index - bestIdx) <= wCal);
+                                    if (rmIdx >= 0) rList.splice(rmIdx, 1);
+                                });
+                            }
+                        } else {
+                            const bVal = baseSig.base_cal ? baseSig.base_cal[bestIdx] : (baseSig.cal[bestIdx] * 0.5);
+                            const newAmp = baseSig.cal[bestIdx] - bVal;
+                            ["default", "permissive", "strict"].forEach(rKey => {
+                                const rList = getCalAnn(currentSegIdx, rKey);
+                                const nextCalIdx = rList.length ? Math.max(...rList.map(item => item.cal_idx || 0)) + 1 : 1;
+                                rList.push({
+                                    cal_idx: nextCalIdx,
+                                    index: bestIdx,
+                                    time_s: bestTime,
+                                    raw: baseSig.cal[bestIdx],
+                                    amp: newAmp,
+                                    status: "ACCEPTED",
+                                    origin: "manual",
+                                    manually_rejected: false,
+                                    reason: "manual_addition"
+                                });
+                                rList.sort((m, n) => m.index - n.index);
+                            });
+                        }
+                        renderPlot();
+                        return;
+                    }
+                    return;
+                }
+
+                if (isUndet || isQCFailed || qc.isManualRejection) return;
                 const polMapKey = currentSegIdx + "|" + polKey;
                 if (!manualPeaksByPol[polMapKey]) manualPeaksByPol[polMapKey] = {};
                 if (!perPeakStrictness[polMapKey]) perPeakStrictness[polMapKey] = {};
@@ -1576,7 +1989,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             const list = annotations[annK];
                             for (let i = list.length - 1; i >= 0; i--) {
                                 if (Math.abs(list[i].index - selIdx) <= w) {
-                                    if (list[i].origin === "manual" || list[i].original_status === "MISSING") {
+                                    if (list[i].original_status === "MISSING") {
                                         list.splice(i, 1);
                                     } else {
                                         list[i].status = list[i].original_status;
@@ -1626,11 +2039,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     if (a.origin === "manual") {
                         deleteManualPeak(a);
                         selectedPeakInfo = null;
+                    } else if (a.status !== "ACCEPTED" && !a.manually_rejected) {
+                        // Unaccepted auto candidate clicked: turn into BLUE manually added peak
+                        a.status = "ACCEPTED";
+                        a.origin = "manual";
+                        a.manually_rejected = false;
+                        a.reason = "";
+                        manMap[a.index] = { index: a.index, time_s: a.time_s, amp: a.amp, raw: a.raw, action: "ADDED" };
+                        selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: a.index };
                     } else {
                         toggleEventState(a);
                         selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: a.index };
                     }
-                } else if (name === "amplitude" && P.amp && ampArr) {
+                } else if ((name === "amplitude" || name === "\u0394R/R\u2080 amplitude" || name === "Raw RatioMetricCalcium" || name === "raw PixelCorrelation" || name.endsWith("amplitude")) && ampArr) {
                     let c = Math.round((pt.x - seg.t0) * seg.fs);
                     let lo = Math.max(0, c - w), hi = Math.min(seg.length - 1, c + w), best = -1, bv = -Infinity;
                     for (let i = lo; i <= hi; i++) if (Number.isFinite(ampArr[i]) && ampArr[i] > bv) { bv = ampArr[i]; best = i; }
@@ -1773,7 +2194,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
             const annotatorId = prompt("Enter annotator initials (e.g., JD):", "XX");
             if (!annotatorId) return;
-            let csv = "source_workbook,sheet_name,sample_id,time_s,confidence,annotator_id,amplitude,origin,strictness,per_peak_strictness,min_rel_amplitude,min_rel_recovery,min_snr,polarity,qc_status,qc_reason\n";
+            let csv = "source_workbook,sheet_name,sample_id,time_s,confidence,annotator_id,amplitude,origin,status,reason,strictness,per_peak_strictness,min_rel_amplitude,min_rel_recovery,min_snr,polarity,qc_status,qc_reason\n";
             segments_data.forEach((seg, idx) => {
                 if (!segmentReviewed[idx]) return;
                 const manualRej = userSegmentRejection[idx];
@@ -1784,14 +2205,42 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const qc = getActiveQC(idx, polInfo.pol, currentRun);
                 if (qc.status !== "PASS") return;
                 getAnn(idx, currentRun, polKey).forEach(a => {
-                    if (a.status !== "ACCEPTED") return;
+                    const isAutoAccepted = (a.origin === "auto" && a.status === "ACCEPTED" && !a.manually_rejected);
+                    const isManualAdded = (a.origin === "manual" && a.status === "ACCEPTED");
+                    const isManuallyRejected = (a.manually_rejected === true || (a.origin === "auto" && a.original_status === "ACCEPTED" && a.status === "REJECTED"));
+                    if (!isAutoAccepted && !isManualAdded && !isManuallyRejected) return;
+
+                    const eventStatus = isManuallyRejected ? "REJECTED" : "ACCEPTED";
+                    const eventReason = isManuallyRejected ? "manually_rejected" : (a.origin === "manual" ? "manual_addition" : (a.reason || ""));
                     const effStrictness = (a.per_peak_strictness && a.per_peak_strictness !== "inherit") ? a.per_peak_strictness : currentRun;
                     const sp = (seg.orientations[polKey].runs[effStrictness] || seg.orientations[polKey].runs[currentRun]).params;
                     const ppStrict = a.per_peak_strictness || "inherit";
-                    csv += `"${source_workbook}","${seg.sheet_name}","${seg.sample_id}",${a.time_s},1,"${annotatorId}",` +
-                           `${a.amp === null ? "" : a.amp},${a.origin},${effStrictness},${ppStrict},${sp.min_rel_amplitude},${sp.min_rel_recovery},${sp.min_snr},${polInfo.pol},` +
+                    // Confidence is uncalibrated -> left empty rather than assigning fabricated 1.0
+                    const confVal = "";
+                    csv += `"${source_workbook}","${seg.sheet_name}","${seg.sample_id}",${a.time_s},${confVal},"${annotatorId}",` +
+                           `${a.amp == null ? "" : a.amp},${a.origin},${eventStatus},"${eventReason}",${effStrictness},${ppStrict},${sp.min_rel_amplitude},${sp.min_rel_recovery},${sp.min_snr},${polInfo.pol},` +
                            `"${qc.status}","${qc.reason}"\n`;
                 });
+                if (seg.cal_runs) {
+                    const calList = getCalAnn(idx, currentRun);
+                    const calR = seg.cal_runs[currentRun] || seg.cal_runs["default"];
+                    const calQC = calR ? calR.qc_status : "PASS";
+                    const calReason = calR ? calR.qc_reason : "";
+                    if (calQC === "PASS") {
+                        calList.forEach(a => {
+                            const isAutoAccepted = (a.origin === "auto" && a.status === "ACCEPTED" && !a.manually_rejected);
+                            const isManualAdded = (a.origin === "manual" && a.status === "ACCEPTED");
+                            const isManuallyRejected = (a.manually_rejected === true || (a.origin === "auto" && a.original_status === "ACCEPTED" && a.status === "REJECTED"));
+                            if (!isAutoAccepted && !isManualAdded && !isManuallyRejected) return;
+                            const eventStatus = isManuallyRejected ? "REJECTED" : "ACCEPTED";
+                            const eventReason = isManuallyRejected ? "manually_rejected" : (a.origin === "manual" ? "manual_addition" : (a.reason || ""));
+                            const sheetName = seg.sheet_name.replace("PixelCorrelation", "RatioMetricCalcium");
+                            csv += `"${source_workbook}","${sheetName}","${seg.sample_id}",${a.time_s},,"${annotatorId}",` +
+                                   `${a.amp == null ? "" : a.amp},${a.origin},${eventStatus},"${eventReason}",${currentRun},inherit,"","","",1,` +
+                                   `"${calQC}","${calReason}"\n`;
+                        });
+                    }
+                }
             });
             const blob = new Blob([csv], {type: "text/csv;charset=utf-8;"});
             const url = URL.createObjectURL(blob);
@@ -1833,7 +2282,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 """
 
 
-def generate_html(segments_data, source_workbook, out_path, default_run="default", workbook_path=None, config=None, segment_rejections=None):
+def generate_html(segments_data, source_workbook, out_path, default_run="default", workbook_path=None, config=None, segment_rejections=None, analysis_mode="pixel"):
     if not segments_data:
         raise ValueError(f"Cannot generate HTML review report for '{source_workbook}': segments_data is empty (zero segments extracted).")
     runs_available = list(segments_data[0]["runs"].keys()) if segments_data and "runs" in segments_data[0] else []
@@ -1855,6 +2304,7 @@ def generate_html(segments_data, source_workbook, out_path, default_run="default
     html = html.replace("__SHA256__", str(sha256))
     html = html.replace("__DEFAULT_RUN__", default_run)
     html = html.replace("__POLARITY_MODE__", polarity_mode_str)
+    html = html.replace("__ANALYSIS_MODE__", str(analysis_mode).upper())
     html = html.replace("__SEGMENT_REJECTIONS__", json.dumps(segment_rejections or {}, allow_nan=False))
 
     # Embed Plotly JS for strictly offline use
@@ -1977,6 +2427,8 @@ def main(argv=None):
                         help="Path to save active polarity overrides to JSON")
     parser.add_argument("--inspect-polarity", action="store_true", default=False,
                         help="Run Stage 1 polarity inspection and print summary table, then exit")
+    parser.add_argument("--analysis-mode", choices=["pixel", "calcium", "pixel-calcium"], default="pixel",
+                        help="Analysis mode: 'pixel' (default), 'calcium' (independent calcium transient analysis), or 'pixel-calcium' (synchronized dual-channel review)")
     args = parser.parse_args(argv)
 
     try:
@@ -2007,7 +2459,8 @@ def main(argv=None):
 
         if args.inspect_polarity:
             process_workbook(args.input_file, params_by_name, config, args.segments,
-                             polarity_overrides=overrides, inspect_only=True)
+                             polarity_overrides=overrides, inspect_only=True,
+                             analysis_mode=args.analysis_mode)
             return
 
         segments_data, source_name = process_workbook(
@@ -2016,6 +2469,7 @@ def main(argv=None):
             config,
             args.segments,
             polarity_overrides=overrides,
+            analysis_mode=args.analysis_mode,
         )
         generate_html(
             segments_data,
@@ -2025,6 +2479,7 @@ def main(argv=None):
             workbook_path=args.input_file,
             config=config,
             segment_rejections=segment_rejections,
+            analysis_mode=args.analysis_mode,
         )
 
         print("\nINSTRUCTIONS:")

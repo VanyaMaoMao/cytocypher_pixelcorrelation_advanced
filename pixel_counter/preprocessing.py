@@ -482,7 +482,7 @@ def build_concatenated_signal(
 
             raw_begin = float(entry["begin"])
             raw_end = float(entry["end"])
-            expected_dur = (len(valid_vals) - 1) / fs if len(valid_vals) > 1 else 0.0
+            expected_dur = (valid_idx[-1] - valid_idx[0]) / fs if len(valid_idx) > 1 else 0.0
             declared_dur = (raw_end - raw_begin) if (np.isfinite(raw_end) and np.isfinite(raw_begin)) else expected_dur
             if abs(declared_dur - expected_dur) > 0.05:
                 row_duration_mismatch_rows.append(int(entry["row_idx"]))

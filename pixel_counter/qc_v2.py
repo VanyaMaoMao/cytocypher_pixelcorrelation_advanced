@@ -409,14 +409,12 @@ def evaluate_signal_interpretability_qc(
         sig_cat = "tracking_artifact"
     elif n_acc == 0:
         is_noise_dominated = enable_l2 and (
-            (sn >= 0.0035 and p95_amp >= 0.018)
-            or (sn >= 0.0045)
-            or (sn >= 0.0028 and p95_amp >= 0.020 and n_rej >= 3)
+            (sn >= 0.0045)
+            or (sn >= 0.0035 and p95_amp >= 0.018)
+            or (sn >= 0.0018 and p95_amp >= 0.008)
             or (analyzable_fraction < 0.50 and sn >= 0.0030)
             or (analyzable_fraction < 0.35)
-            or (sn >= 0.0018 and p95_amp >= 0.008)
-            or (baseline_drift_range >= 0.0025)
-            or (n_rej >= 1)
+            or (baseline_drift_range >= 0.040 and (p95_amp >= 0.015 or sn >= 0.0010))
             or (zero_like_frac >= 0.44)
         )
         if is_noise_dominated:

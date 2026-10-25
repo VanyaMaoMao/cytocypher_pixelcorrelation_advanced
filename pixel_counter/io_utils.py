@@ -76,18 +76,25 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
             e = ends.iloc[i]
             if pd.notna(b) and pd.notna(e) and (e - b) > 0.05:
                 row_vals = pd.to_numeric(df.iloc[i][y_cols], errors="coerce").values
-                valid_n = int(np.sum(np.isfinite(row_vals)))
-                if valid_n > 10:
-                    implied_fs_candidates.append((valid_n - 1) / (e - b))
+                finite_indices = np.where(np.isfinite(row_vals))[0]
+                if len(finite_indices) > 1:
+                    # Elapsed sample span is the index distance between first and last finite sample
+                    sample_span = int(finite_indices[-1] - finite_indices[0])
+                    if sample_span > 10:
+                        implied_fs_candidates.append(sample_span / (e - b))
 
     if implied_fs_candidates:
         med_implied = float(np.median(implied_fs_candidates))
         consistent_rows = [f for f in implied_fs_candidates if abs(f - med_implied) / med_implied < 0.01]
+        logger.info(
+            "Sampling frequency evaluation for sheet %r: declared_fs=%.2f Hz, inferred_fs=%.2f Hz (from %d valid rows, %d consistent within 1%%).",
+            sheet_name, fs, med_implied, len(implied_fs_candidates), len(consistent_rows)
+        )
         if len(consistent_rows) >= 2 and abs(fs - med_implied) > 1.0:
             corrected_fs = float(round(med_implied)) if abs(med_implied - round(med_implied)) < 0.05 else float(med_implied)
             logger.warning(
-                "Declared Sampling Frequency (%s) in sheet %r conflicts with consistent row-timestamp implied fs (%.2f). Using implied fs %s.",
-                fs, sheet_name, med_implied, corrected_fs
+                "Declared Sampling Frequency (%.2f Hz) in sheet %r conflicts with consistent row-timestamp implied fs (%.2f Hz, %d rows). Overriding with verified implied fs %.2f Hz.",
+                fs, sheet_name, med_implied, len(consistent_rows), corrected_fs
             )
             fs = corrected_fs
 
