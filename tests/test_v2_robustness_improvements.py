@@ -1353,6 +1353,123 @@ def test_html_review_report_client_initialization(tmp_path):
             assert data["polarityCount"] == 3
 
 
+# ---------------------------------------------------------------------------
+# 38. Sampling Frequency Reconciliation Robustness to Internal Missing NaNs
+# ---------------------------------------------------------------------------
+def test_sampling_frequency_reconciliation_with_internal_nans(tmp_path):
+    """When a row contains internal missing values (NaNs), sampling frequency inference
+    must be based on the true sample index span (k_last - k_first), not raw count of finite values."""
+    from pixel_counter.config import BeatCounterConfig
+    from pixel_counter.io_utils import load_cytocypher_excel
+    from pixel_counter.preprocessing import build_concatenated_signal
+
+    fs_true = 250.0
+    dt_per_sample = 1.0 / fs_true
+    n_samples = 265
+    row_dur = (n_samples - 1) * dt_per_sample
+
+    records = []
+    for r_idx in range(3):
+        rec = {
+            "Sampling Frequency": 208.32,  # Conflicting metadata
+            "Begin": float(r_idx * 1.0),
+            "End": float(r_idx * 1.0 + row_dur),
+        }
+        for j in range(n_samples):
+            # Introduce 25 internal NaNs between sample 50 and 74
+            if 50 <= j < 75:
+                rec[f"y {j}"] = np.nan
+            else:
+                rec[f"y {j}"] = 0.5 + 0.1 * np.sin(2 * np.pi * j / 25.0)
+        records.append(rec)
+
+    df_test = pd.DataFrame(records)
+    test_file = tmp_path / "test_implied_fs_nans.xlsx"
+    df_test.to_excel(test_file, sheet_name="PixelCorrelation Segment 1", index=False)
+
+    df_loaded, y_cols, fs_inferred, _ = load_cytocypher_excel(test_file, sheet_name="PixelCorrelation Segment 1")
+    # Must infer 250.0 Hz exactly despite 25 internal NaNs (which would have yielded 226 Hz if counting valid_n)
+    assert fs_inferred == pytest.approx(250.0, abs=0.01), f"Expected 250.0 Hz, got {fs_inferred}"
+
+    sig_raw, _, meta = build_concatenated_signal(df_loaded, y_cols, fs_inferred, BeatCounterConfig())
+    assert meta.get("stitch_overlap_conflicts", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# 39. Scientific Interpretation of Zero-Event Recordings
+# ---------------------------------------------------------------------------
+def test_clean_quiescent_recording_with_rejected_impulse_passes_qc():
+    """A valid, quiet recording with zero physiological contractions and an isolated
+    rejected impulse must PASS QC as clean_silent_quiescent, not fail as noise_dominated."""
+    from pixel_counter.config import BeatCounterConfig
+    from pixel_counter.v2_pipeline import analyze_v2_pipeline
+
+    fs = 250.0
+    rng = np.random.default_rng(42)
+    # 6 seconds of low-noise quiescent baseline (sigma ~ 0.0008)
+    raw = 0.80 + rng.normal(0, 0.0008, int(6.0 * fs))
+    # Inject one isolated non-physiological impulse spike that detector will reject (n_acc=0, n_rej=1)
+    raw[int(3.0 * fs)] -= 0.03
+
+    res = analyze_v2_pipeline(raw, fs, BeatCounterConfig(), t0=0.0, meta={"time_origin_s": 0.0}, polarity_override=-1)
+    md = res["metadata"]
+    assert md["qc_status"] == "PASS"
+    assert md["qc_reason"] == "no_accepted_contractions"
+    assert md["qc_layer1_status"] == "PASS"
+    assert md["qc_layer2_status"] == "PASS"
+    assert md["signal_quality_category"] == "clean_silent_quiescent"
+    assert md["n_accepted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 40. Auxiliary Trace Loading: Graceful Handling of Empty Calcium Sheet (DISH1TEST)
+# ---------------------------------------------------------------------------
+def test_dish1test_calcium_empty_sheet_handling():
+    """DISH1TEST Segment 1 contains an empty RatioMetricCalcium sheet in Excel.
+    load_aux_channel must log the diagnostic, record empty_sheet, and omit calcium without failing."""
+    import run_v2_review_utility as rv
+
+    wb_dish1 = Path(__file__).resolve().parent.parent / "all data" / "DISH1TEST individual transients result.xlsx"
+    if not wb_dish1.exists():
+        pytest.skip(f"Workbook not found: {wb_dish1}")
+
+    segs, name = rv.process_workbook(str(wb_dish1), segments=[1])
+    assert len(segs) == 1
+    seg1 = segs[0]
+
+    # PixelCorrelation and PixelIntensity must be valid and present
+    assert seg1["length"] == 2142
+    assert seg1["sig_int_b64"] is not None
+    assert seg1["length_int"] == 2142
+
+    # RatioMetricCalcium must be absent with explicit empty_sheet status
+    assert seg1["sig_cal_b64"] is None
+    assert seg1["length_cal"] == 0
+    assert seg1["cal_status"] == "empty_sheet"
+
+    # Detector peaks and QC must remain intact
+    def_run = seg1["runs"]["default"]
+    assert def_run["qc_status"] == "PASS"
+    n_acc = sum(1 for s in def_run["events"]["status"] if s == "ACCEPTED")
+    assert n_acc == 2
+
+
+# ---------------------------------------------------------------------------
+# 41. Scientifically Accurate Annotation Export: Uncalibrated Confidence
+# ---------------------------------------------------------------------------
+def test_annotation_export_uncalibrated_confidence_and_decision_tracking():
+    """saveAnnotations() in review HTML must leave confidence empty (uncalibrated)
+    and distinguish auto accepted, manually added, and manually rejected events."""
+    from run_v2_review_utility import HTML_TEMPLATE
+
+    # Static template checks
+    assert 'let csv = "source_workbook,sheet_name,sample_id,time_s,confidence,annotator_id,amplitude,origin,status,reason' in HTML_TEMPLATE
+    assert 'const confVal = "";' in HTML_TEMPLATE
+    assert 'const isManuallyRejected = (a.manually_rejected === true' in HTML_TEMPLATE
+    assert 'eventStatus' in HTML_TEMPLATE
+
+
+
 
 
 

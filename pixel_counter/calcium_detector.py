@@ -56,6 +56,15 @@ class CalciumDetectorParams:
     dropout_threshold: float = 0.05       # Values below this threshold are hardware sensor dropouts
     min_fwhm_s: float = 0.035             # Minimum FWHM to reject single-sample spikes (seconds)
 
+    # Scientific Dual Threshold Parameters for Adult Calcium
+    alpha_ref_main: float = 0.60
+    k_main_sigma: float = 5.0
+    min_norm_height_main: float = 0.22
+    alpha_ref_sce: float = 0.28
+    k_sce_sigma: float = 3.0
+    min_norm_height_sce: float = 0.08
+    is_adult_cardiomyocyte: bool = False
+
 
 CALCIUM_STRICTNESS_PRESETS: Dict[str, CalciumDetectorParams] = {
     "permissive": CalciumDetectorParams(
@@ -108,6 +117,81 @@ CALCIUM_STRICTNESS_PRESETS: Dict[str, CalciumDetectorParams] = {
         baseline_smooth_s=0.25,
         dropout_threshold=0.05,
         min_fwhm_s=0.040,
+    ),
+}
+
+ADULT_CALCIUM_STRICTNESS_PRESETS: Dict[str, CalciumDetectorParams] = {
+    "permissive": CalciumDetectorParams(
+        preset_name="permissive",
+        min_height=0.010,
+        min_norm_height=0.05,
+        min_rel_amplitude=0.25,
+        min_prominence_sigma=2.5,
+        min_prominence_abs=0.010,
+        min_recovery=0.25,
+        min_separation_s=0.10,
+        smoothing_sigma_s=0.015,
+        snapping_window_s=0.035,
+        baseline_window_s=1.5,
+        baseline_percentile=15.0,
+        baseline_smooth_s=0.20,
+        dropout_threshold=0.05,
+        min_fwhm_s=0.030,
+        alpha_ref_main=0.45,
+        k_main_sigma=4.0,
+        min_norm_height_main=0.15,
+        alpha_ref_sce=0.20,
+        k_sce_sigma=2.2,
+        min_norm_height_sce=0.05,
+        is_adult_cardiomyocyte=True,
+    ),
+    "default": CalciumDetectorParams(
+        preset_name="default",
+        min_height=0.015,
+        min_norm_height=0.08,
+        min_rel_amplitude=0.45,
+        min_prominence_sigma=3.5,
+        min_prominence_abs=0.015,
+        min_recovery=0.45,
+        min_separation_s=0.11,
+        smoothing_sigma_s=0.015,
+        snapping_window_s=0.035,
+        baseline_window_s=1.5,
+        baseline_percentile=15.0,
+        baseline_smooth_s=0.20,
+        dropout_threshold=0.05,
+        min_fwhm_s=0.035,
+        alpha_ref_main=0.60,
+        k_main_sigma=5.0,
+        min_norm_height_main=0.22,
+        alpha_ref_sce=0.28,
+        k_sce_sigma=3.0,
+        min_norm_height_sce=0.08,
+        is_adult_cardiomyocyte=True,
+    ),
+    "strict": CalciumDetectorParams(
+        preset_name="strict",
+        min_height=0.025,
+        min_norm_height=0.12,
+        min_rel_amplitude=0.55,
+        min_prominence_sigma=5.0,
+        min_prominence_abs=0.025,
+        min_recovery=0.55,
+        min_separation_s=0.14,
+        smoothing_sigma_s=0.015,
+        snapping_window_s=0.035,
+        baseline_window_s=1.8,
+        baseline_percentile=15.0,
+        baseline_smooth_s=0.25,
+        dropout_threshold=0.05,
+        min_fwhm_s=0.040,
+        alpha_ref_main=0.72,
+        k_main_sigma=6.5,
+        min_norm_height_main=0.28,
+        alpha_ref_sce=0.35,
+        k_sce_sigma=4.0,
+        min_norm_height_sce=0.12,
+        is_adult_cardiomyocyte=True,
     ),
 }
 
@@ -442,6 +526,144 @@ def detect_calcium_transients(
     eff_min_norm_height = max(params.min_norm_height, params.min_rel_amplitude * ref_norm_amp)
     eff_prominence = max(prom_noise_floor, params.min_rel_amplitude * ref_prom)
 
+    is_adult = bool(getattr(params, "is_adult_cardiomyocyte", False))
+    if is_adult:
+        # Scientific Adult Cardiomyocyte Dual-Threshold Detection
+        med_base = float(np.median(baseline[valid_indices])) if len(valid_indices) > 0 else 1.0
+        norm_sigma = raw_noise_sigma / max(0.05, med_base)
+        qual_cands = [
+            c for c in initial_cands
+            if (c["norm_amp"] >= max(0.14, 4.0 * norm_sigma) and c["fwhm_s"] >= 0.08 and c["prom"] >= 2.5 * raw_noise_sigma)
+        ]
+        if qual_cands:
+            sorted_a = np.sort([c["norm_amp"] for c in qual_cands])
+            sorted_p = np.sort([c["prom"] for c in qual_cands])
+            k = max(1, int(np.ceil(0.20 * len(sorted_a))))
+            ref_norm_amp = float(np.median(sorted_a[-k:]))
+            ref_prom = float(np.median(sorted_p[-k:]))
+        else:
+            ref_norm_amp = None
+            ref_prom = None
+
+        alpha_main = float(getattr(params, "alpha_ref_main", 0.60))
+        k_main = float(getattr(params, "k_main_sigma", 5.0))
+        t_abs_main = float(getattr(params, "min_norm_height_main", 0.22))
+
+        alpha_sce = float(getattr(params, "alpha_ref_sce", 0.28))
+        k_sce = float(getattr(params, "k_sce_sigma", 3.0))
+        t_abs_sce = float(getattr(params, "min_norm_height_sce", 0.08))
+
+        if ref_norm_amp is not None and np.isfinite(ref_norm_amp) and ref_norm_amp > 0:
+            eff_main_floor = min(t_abs_main, alpha_main * ref_norm_amp)
+            t_main_cal = max(alpha_main * ref_norm_amp, k_main * norm_sigma, eff_main_floor)
+            eff_sce_floor = min(t_abs_sce, alpha_sce * ref_norm_amp)
+            t_sce_cal = max(eff_sce_floor, k_sce * norm_sigma, eff_sce_floor)
+        else:
+            t_main_cal = max(k_main * norm_sigma, t_abs_main)
+            t_sce_cal = max(k_sce * norm_sigma, t_abs_sce)
+
+        t_main_cal = max(t_main_cal, t_sce_cal)
+        eff_min_norm_height = t_main_cal
+
+        prom_noise_floor = max(params.min_prominence_abs, 2.85 * raw_noise_sigma)
+        if ref_prom is not None and np.isfinite(ref_prom):
+            eff_prominence = max(prom_noise_floor, min(params.min_rel_amplitude * ref_prom, 2.5 * raw_noise_sigma))
+        else:
+            eff_prominence = max(prom_noise_floor, 2.5 * raw_noise_sigma)
+
+        events_records = []
+        for c_info in initial_cands:
+            c = c_info["cand_idx"]
+            snapped_pk = c_info["snapped_pk"]
+            pk_time = float(t0 + snapped_pk / fs)
+            raw_val = c_info["raw_val"]
+            base_val = c_info["base_val"]
+            delta_r = c_info["delta_r"]
+            norm_amp = c_info["norm_amp"]
+            fwhm_val = c_info["fwhm_s"]
+            cand_prom = c_info["prom"]
+
+            status = "ACCEPTED"
+            reason = "accepted_main_transient"
+            ev_class = "MAIN"
+            det_stage = "stage1"
+
+            if is_dropout[snapped_pk]:
+                status = "REJECTED"
+                reason = "in_sensor_dropout"
+                ev_class = "REJECTED"
+                det_stage = "none"
+            elif fwhm_val < params.min_fwhm_s:
+                status = "REJECTED"
+                reason = "narrow_spike"
+                ev_class = "REJECTED"
+                det_stage = "none"
+            elif cand_prom < prom_noise_floor:
+                status = "REJECTED"
+                reason = "below_noise_prominence_floor"
+                ev_class = "REJECTED"
+                det_stage = "none"
+            else:
+                if norm_amp >= t_main_cal:
+                    status = "ACCEPTED"
+                    reason = "accepted_main_transient"
+                    ev_class = "MAIN"
+                    det_stage = "stage1"
+                elif norm_amp >= t_sce_cal:
+                    status = "ACCEPTED"
+                    reason = "accepted_secondary_transient"
+                    ev_class = "SECONDARY"
+                    det_stage = "stage2_sce"
+                else:
+                    status = "REJECTED"
+                    reason = "below_calcium_sce_threshold"
+                    ev_class = "REJECTED"
+                    det_stage = "none"
+
+            events_records.append({
+                "cand_index": int(c),
+                "peak_index": int(snapped_pk),
+                "time_s": pk_time,
+                "peak_raw_value": raw_val,
+                "local_baseline_value": base_val,
+                "amplitude": norm_amp,
+                "delta_r": delta_r,
+                "fwhm_s": fwhm_val,
+                "prom": cand_prom,
+                "status": status,
+                "event_class": ev_class,
+                "reason": reason,
+                "diagnostic_status": status,
+                "diagnostic_reason": reason,
+                "origin": "auto",
+                "per_peak_strictness": "inherit",
+                "detection_stage": det_stage,
+            })
+
+        events_df = pd.DataFrame(events_records)
+        n_main_cnt = sum(1 for r in events_records if r["status"] == "ACCEPTED" and r["event_class"] == "MAIN")
+        n_sec_cnt = sum(1 for r in events_records if r["status"] == "ACCEPTED" and r["event_class"] == "SECONDARY")
+
+        detector_metrics = {
+            "ref_norm_amp": float(ref_norm_amp) if ref_norm_amp is not None else 0.50,
+            "ref_prom": float(ref_prom) if ref_prom is not None else 0.05,
+            "eff_min_norm_height": float(eff_min_norm_height),
+            "eff_prominence": float(eff_prominence),
+            "prom_noise_floor": float(prom_noise_floor),
+            "raw_noise_sigma": float(raw_noise_sigma),
+            "n_stage1_accepted": int(n_main_cnt),
+            "n_stage2_recovered": int(n_sec_cnt),
+            "n_main": int(n_main_cnt),
+            "n_secondary": int(n_sec_cnt),
+            "threshold_main": float(t_main_cal),
+            "threshold_sce": float(t_sce_cal),
+            "threshold_ordering_status": "distinct" if t_main_cal > t_sce_cal else "tied",
+        }
+        events_df.attrs["detector_metrics"] = detector_metrics
+        if return_metrics:
+            return events_df, baseline, raw_noise_sigma, is_dropout, detector_metrics
+        return events_df, baseline, raw_noise_sigma, is_dropout
+
     # 5. Evaluate candidate peaks against scientific criteria (Stage 1: High confidence)
     events_records: List[Dict[str, Any]] = []
 
@@ -618,6 +840,11 @@ def detect_calcium_transients(
         "raw_noise_sigma": float(raw_noise_sigma),
         "n_stage1_accepted": int(n_stage1_acc),
         "n_stage2_recovered": int(n_stage2_rec),
+        "threshold_main": float(eff_min_norm_height),
+        "threshold_sce": float(eff_min_norm_height * 0.50),
+        "threshold_ordering_status": "distinct",
+        "n_main": int(n_stage1_acc + n_stage2_rec),
+        "n_secondary": 0,
     }
     events_df.attrs["detector_metrics"] = detector_metrics
     if return_metrics:
@@ -706,16 +933,45 @@ def evaluate_calcium_qc(
     snr = med_amp / max(1e-5, noise_sigma)
     meta["snr"] = snr
 
-    # If autocorrelation is low and noise floor is high, this is pure optical/electronic noise
-    # (e.g. SCRAMBLED ISO or ERROR-MOTION-CONTROLLER)
-    if max_ac_lag < 0.10 and noise_sigma > 0.0035:
-        meta["rejection_category"] = "noise_dominated"
-        return "REJECT", "noise_dominated", meta
+    is_adult = bool(getattr(params, "is_adult_cardiomyocyte", False))
+    if is_adult:
+        n_main = int(np.sum((events_df["status"] == "ACCEPTED") & (events_df["event_class"] == "MAIN"))) if not events_df.empty else 0
+        meta["n_main"] = n_main
 
-    # Severe uninterpretable noise check (e.g. IMR90 Seg 37)
-    if noise_sigma > 0.020 and (max_ac_lag < 0.25 or snr < 3.2):
-        meta["rejection_category"] = "uninterpretable_noise"
-        return "REJECT", "uninterpretable_noise", meta
+        has_authentic_main = False
+        if n_main >= 1 and not events_df.empty:
+            main_evs = events_df[(events_df["status"] == "ACCEPTED") & (events_df["event_class"] == "MAIN")]
+            if not main_evs.empty:
+                max_delta_r = float(np.max(main_evs["delta_r"])) if "delta_r" in main_evs.columns else float(np.max(main_evs["amplitude"]))
+                raw_snr = max_delta_r / max(1e-5, noise_sigma)
+                max_fwhm = float(np.max(main_evs["fwhm_s"]))
+                if raw_snr >= 4.5 and max_fwhm >= 0.10:
+                    has_authentic_main = True
+
+        if not has_authentic_main:
+            if noise_sigma > 0.020 and (max_ac_lag < 0.25 or snr < 3.2):
+                meta["rejection_category"] = "uninterpretable_noise"
+                return "REJECT", "uninterpretable_noise", meta
+
+        if n_accepted > 0 and n_main == 0 and n_accepted <= 2 and (noise_sigma > 0.012 or snr < 6.5):
+            meta["rejection_category"] = "uninterpretable_noise"
+            return "REJECT", "uninterpretable_noise", meta
+
+        if not has_authentic_main:
+            if max_ac_lag < 0.10 and noise_sigma > 0.0035:
+                meta["rejection_category"] = "noise_dominated"
+                return "REJECT", "noise_dominated", meta
+    else:
+        # If autocorrelation is low and noise floor is high, this is pure optical/electronic noise
+        # (e.g. SCRAMBLED ISO or ERROR-MOTION-CONTROLLER)
+        if max_ac_lag < 0.10 and noise_sigma > 0.0035:
+            meta["rejection_category"] = "noise_dominated"
+            return "REJECT", "noise_dominated", meta
+
+        # Severe uninterpretable noise check (e.g. IMR90 Seg 37)
+        if noise_sigma > 0.020 and (max_ac_lag < 0.25 or snr < 3.2):
+            meta["rejection_category"] = "uninterpretable_noise"
+            return "REJECT", "uninterpretable_noise", meta
 
     # If zero accepted events
     if n_accepted == 0:
@@ -744,8 +1000,11 @@ def analyze_calcium_pipeline(
     Runs multi-preset detection (default, permissive, strict) and computes
     frequency, BPM, quality control metrics, and scientifically normalized amplitude.
     """
+    is_adult_p = bool(getattr(params, "is_adult_cardiomyocyte", False)) if params else False
+    preset_dict = ADULT_CALCIUM_STRICTNESS_PRESETS if is_adult_p else CALCIUM_STRICTNESS_PRESETS
+
     if params is None:
-        params = CALCIUM_STRICTNESS_PRESETS["default"]
+        params = preset_dict["default"]
 
     n = len(sig_raw)
     dur = float(n / fs) if (n > 0 and fs > 0) else 0.0
@@ -757,7 +1016,7 @@ def analyze_calcium_pipeline(
     primary_dropout: Optional[np.ndarray] = None
 
     for preset_name in ["default", "permissive", "strict"]:
-        p = CALCIUM_STRICTNESS_PRESETS[preset_name]
+        p = preset_dict[preset_name]
         ev_df, base, n_sig, is_drop = detect_calcium_transients(sig_raw, fs, t0, p)
         qc_st, qc_rs, qc_meta = evaluate_calcium_qc(sig_raw, fs, ev_df, is_drop, n_sig, p)
 
@@ -787,15 +1046,25 @@ def analyze_calcium_pipeline(
         s1_acc = int(det_metrics.get("n_stage1_accepted", n_acc))
         s2_rec = int(det_metrics.get("n_stage2_recovered", 0))
 
+        t_main_met = float(det_metrics.get("threshold_main", eff_s1_amp))
+        t_sce_met = float(det_metrics.get("threshold_sce", getattr(p, "min_norm_height_sce", 0.08)))
+        n_main_met = int(det_metrics.get("n_main", s1_acc))
+        n_sec_met = int(det_metrics.get("n_secondary", s2_rec))
+
         runs[preset_name] = {
             "events": ev_df,
             "qc_status": qc_st,
             "qc_reason": qc_rs,
             "qc_meta": qc_meta,
             "n_accepted": reportable_acc,
+            "n_main": n_main_met if qc_st == "PASS" else 0,
+            "n_secondary": n_sec_met if qc_st == "PASS" else 0,
             "frequency_hz": freq_hz,
             "frequency_bpm": freq_bpm,
             "effective_amplitude_threshold": eff_s1_amp,
+            "threshold_main": t_main_met,
+            "threshold_sce": t_sce_met,
+            "threshold_ordering_status": det_metrics.get("threshold_ordering_status", "distinct"),
             "stage1_amplitude_criterion": eff_s1_amp,
             "reference_amplitude": ref_norm_amp,
             "effective_prominence": eff_prom,
@@ -813,7 +1082,7 @@ def analyze_calcium_pipeline(
             primary_noise = n_sig
             primary_dropout = is_drop
 
-    default_run = runs[params.preset_name]
+    default_run = runs.get(params.preset_name, runs["default"])
 
     ibi_mean_s = None
     ibi_cv = None

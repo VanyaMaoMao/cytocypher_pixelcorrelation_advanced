@@ -506,10 +506,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-        <h2 style="margin:0;">Cytocypher v2 Analysis Review</h2>
+        <h2 id="main_title" style="margin:0;">Cytocypher v2 Analysis Review</h2>
         <span id="analysis_mode_badge" style="padding:5px 12px; border-radius:4px; font-weight:bold; font-size:13px; background:#198754; color:white;">MODE: __ANALYSIS_MODE__</span>
     </div>
-    <div class="info">Source: <span id="source_name"></span> &nbsp;|&nbsp; Polarity Mode: <span id="polarity_mode_badge" style="background:#e8f0fe; color:#1a73e8; padding:3px 8px; border-radius:4px; font-weight:bold;">__POLARITY_MODE__</span></div>
+    <div class="info">
+        Source: <span id="source_name"></span>
+        <span id="polarity_mode_container"> &nbsp;|&nbsp; Polarity Mode: <span id="polarity_mode_badge" style="background:#e8f0fe; color:#1a73e8; padding:3px 8px; border-radius:4px; font-weight:bold;">__POLARITY_MODE__</span></span>
+    </div>
 
     <div class="controls">
         <div style="display:flex; align-items:center; gap:6px;">
@@ -518,11 +521,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <select id="segment_select"></select>
             <button id="btn_next" class="btn-nav" type="button" title="Next segment (Right Arrow or 'n')">Next &rarr;</button>
         </div>
-        <label>Polarity: <select id="polarity_select"></select></label>
+        <label id="lbl_polarity">Polarity: <select id="polarity_select"></select></label>
         <label>Detector strictness: <select id="run_select"></select></label>
         <label><input type="checkbox" id="chk_rejected"> Show rejected candidates (diagnostic)</label>
         <label><input type="checkbox" id="chk_prelim_diagnostic"> Show preliminary candidates (diagnostic only)</label>
-        <label><input type="checkbox" id="chk_raw"> Show raw PixelCorrelation</label>
+        <label id="lbl_raw"><input type="checkbox" id="chk_raw" checked> <span id="lbl_raw_text">Show raw PixelCorrelation</span></label>
+        <label id="lbl_reconstruction" style="display:none;"><input type="checkbox" id="chk_reconstruction"> Show reconstructed intervals (diagnostic only)</label>
+        <label id="lbl_artifacts" style="display:none;"><input type="checkbox" id="chk_artifacts"> Show tracking artifacts (diagnostic)</label>
         <label style="background:#eee; padding:5px; border-radius:3px;">
             <input type="checkbox" id="chk_reviewed"> Mark segment as reviewed</label>
         <div style="background:#fff0f0; padding:5px 8px; border-radius:4px; border:1px solid #f5c2c7; display:inline-flex; align-items:center; gap:6px;">
@@ -555,19 +560,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 <option value="strict">Strict</option>
             </select>
         </label>
+        <label id="lbl_peak_class" style="display:none; font-weight:bold;">Peak class:
+            <select id="peak_class_select">
+                <option value="MAIN">MAIN</option>
+                <option value="SECONDARY">SECONDARY</option>
+                <option value="AMBIGUOUS">AMBIGUOUS</option>
+            </select>
+        </label>
+        <span id="shape_legend" style="display:none; font-size:12px; color:#555;">
+            Shapes: <b>&#9679; Circle</b> = MAIN &nbsp;|&nbsp; <b>&#9670; Diamond</b> = SECONDARY &nbsp;|&nbsp;
+        </span>
         <span style="font-size:12px; color:#555;">
-            Legend: <b style="color:#28a745;">&#9679; GREEN</b> = Automatically accepted &nbsp;|&nbsp;
-            <b style="color:#007bff;">&#9679; BLUE</b> = Manually added &nbsp;|&nbsp;
+            Legend: <b style="color:#28a745;">&#9679; GREEN</b> = Auto MAIN &nbsp;|&nbsp;
+            <b style="color:#6f42c1;">&#9670; PURPLE</b> = Auto SECONDARY &nbsp;|&nbsp;
+            <b style="color:#007bff;">&#9679;/&#9670; BLUE</b> = Manually added &nbsp;|&nbsp;
             <b style="color:#dc3545;">&#10006; RED</b> = Rejected automatic peak
         </span>
     </div>
     <div style="margin-bottom:8px;">
-        <b>Review:</b> click a <b style="color:#28a745;">GREEN</b> (automatically accepted) peak to reject it into a visible <b style="color:#dc3545;">RED CROSS</b>;
+        <span id="instructions_sarcomere_text" style="display:none;"><b>Review:</b> click shortening curve near peak to add manual contraction (<b style="color:#007bff;">BLUE</b> circle/diamond according to selected class; click again to delete). Click auto <b style="color:#28a745;">GREEN</b> MAIN or <b style="color:#6f42c1;">PURPLE</b> SECONDARY to reject (<b style="color:#dc3545;">RED CROSS</b>). Click RED CROSS again to restore original class. Clicks on raw SarcomereLength panel are ignored.</span>
+        <span id="instructions_polarity_text"><b>Review:</b> click a <b style="color:#28a745;">GREEN</b> (automatically accepted) peak to reject it into a visible <b style="color:#dc3545;">RED CROSS</b>;
         click the same <b style="color:#dc3545;">RED CROSS</b> again to restore it to <b style="color:#28a745;">GREEN</b>;
         click on an unmarked part of the amplitude trace to add a missed contraction in <b style="color:#007bff;">BLUE</b> (snapped to the local maximum);
         click that same <b style="color:#007bff;">BLUE</b> peak again to delete it completely.
         Use <b>Per-peak strictness</b> above to evaluate an individual peak under <i>Permissive</i>, <i>Default</i>, or <i>Strict</i> detector criteria, or return to <i>Use global setting</i>.
-        Use the <b>Polarity</b> dropdown to inspect or override physiological orientation (+1 or -1) without re-running Python code.
+        Use the <b>Polarity</b> dropdown to inspect or override physiological orientation (+1 or -1) without re-running Python code.</span>
     </div>
 
     <div id="client_error_banner" class="fail" style="display:none; margin: 15px 0; font-size: 14px; background: #fff0f0; border: 2px solid #dc3545; color: #721c24; padding: 12px; border-radius: 4px;"></div>
@@ -602,6 +619,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const source_sha256 = "__SHA256__";
         const DEFAULT_RUN = "__DEFAULT_RUN__";
         const initialSegmentRejections = __SEGMENT_REJECTIONS__;
+        const analysisMode = "__ANALYSIS_MODE__";
+        const isSarcomereMode = (analysisMode === "SARCOMERE" || analysisMode === "SARCOMERE-CALCIUM");
+        const isDualMode = (analysisMode === "SARCOMERE-CALCIUM");
 
         let currentSegIdx = 0;
         let currentRun = DEFAULT_RUN;
@@ -643,6 +663,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     inten: s.sig_int_b64 ? decodeFloat32Array(s.sig_int_b64) : null,
                     cal: s.sig_cal_b64 ? decodeFloat32Array(s.sig_cal_b64) : null,
                     base_cal: s.baseline_cal_b64 ? decodeFloat32Array(s.baseline_cal_b64) : null,
+                    pct_shortening: s.pct_shortening_b64 ? decodeFloat32Array(s.pct_shortening_b64) : null,
+                    l0_baseline: s.l0_baseline_b64 ? decodeFloat32Array(s.l0_baseline_b64) : null,
                 };
             }
             return decodedSignals[segIdx];
@@ -687,6 +709,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         function getActivePolarity(segIdx) {
             const seg = segments_data[segIdx];
+            if (isSarcomereMode) {
+                return { pol: 1, source: "automatic", isOverride: false };
+            }
             if (userPolarityOverride[segIdx] !== undefined) {
                 const val = userPolarityOverride[segIdx];
                 if (val === 1 || val === -1) {
@@ -701,13 +726,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         function getRunEvents(segIdx, polKey, runName) {
             const seg = segments_data[segIdx];
+            if (isSarcomereMode) {
+                const targetRuns = seg.runs;
+                if (targetRuns && targetRuns[runName]) return targetRuns[runName].events;
+                if (targetRuns && targetRuns["default"]) return targetRuns["default"].events;
+            }
             if ((polKey === "1" || polKey === "-1") && seg.orientations && seg.orientations[polKey] && seg.orientations[polKey].runs[runName]) {
                 return seg.orientations[polKey].runs[runName].events;
             }
             if (seg.runs && seg.runs[runName]) {
                 return seg.runs[runName].events;
             }
-            return {index: [], time_s: [], amplitude: [], raw_value: [], status: [], reason: [], diagnostic_status: [], diagnostic_reason: []};
+            return {index: [], time_s: [], amplitude: [], raw_value: [], status: [], reason: [], diagnostic_status: [], diagnostic_reason: [], event_class: []};
         }
 
         const calAnnotations = {};
@@ -734,6 +764,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     delta_r: ev.delta_r ? ev.delta_r[i] : null,
                     base: ev.local_baseline ? ev.local_baseline[i] : null,
                     raw: ev.raw_value[i],
+                    event_class: ev.event_class ? ev.event_class[i] : (ev.status[i] === "ACCEPTED" ? "MAIN" : "REJECTED"),
                     status: ev.status[i],
                     original_status: ev.status[i],
                     original_reason: ev.reason[i] || "",
@@ -857,7 +888,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             reason: "",
                             origin: "manual",
                             manually_rejected: false,
-                            per_peak_strictness: "inherit"
+                            per_peak_strictness: "inherit",
+                            event_class: mRec.event_class || "MAIN"
                         });
                     }
                 } else if (mRec.action === "REJECTED") {
@@ -889,7 +921,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     reason: ev.reason[i] || "", origin: "auto", manually_rejected: false, per_peak_strictness: "inherit",
                     detection_stage: ev.detection_stage ? ev.detection_stage[i] : (ev.status[i] === "ACCEPTED" ? "stage1" : "none"),
                     diagnostic_status: diagStatuses[i] || ev.status[i],
-                    diagnostic_reason: diagReasons[i] || ev.reason[i] || ""
+                    diagnostic_reason: diagReasons[i] || ev.reason[i] || "",
+                    event_class: (ev.event_class && ev.event_class[i]) ? ev.event_class[i] : "MAIN"
                 }));
                 // Also include any candidate from 'permissive' not already in list so it can be selected for per-peak strictness
                 const permEv = getRunEvents(segIdx, polKey, "permissive");
@@ -905,7 +938,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                 origin: "auto", manually_rejected: false, per_peak_strictness: "inherit",
                                 detection_stage: permEv.detection_stage ? permEv.detection_stage[i] : "none",
                                 diagnostic_status: permDiagSt[i] || "REJECTED",
-                                diagnostic_reason: permEv.reason[i] || "below_global_strictness_threshold"
+                                diagnostic_reason: permEv.reason[i] || "below_global_strictness_threshold",
+                                event_class: (permEv.event_class && permEv.event_class[i]) ? permEv.event_class[i] : "MAIN"
                             });
                         }
                     });
@@ -942,8 +976,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             return { status: seg.qc_status, reason: seg.qc_reason };
         }
 
-        function countsFor(idx, pol, runKey) {
+                function countsFor(idx, pol, runKey) {
             runKey = runKey || currentRun;
+            if (isSarcomereMode) {
+                const qc = getActiveQC(idx, 1, runKey);
+                if (qc.status !== "PASS" || qc.isManualRejection) {
+                    return { auto: 0, added: 0, rej: 0, final: 0, main: 0, sec: 0, amb: 0 };
+                }
+                const anns = getAnn(idx, runKey, "1");
+                const acc = anns.filter(a => a.status === "ACCEPTED");
+                const autoAcc = acc.filter(a => a.origin !== "manual").length;
+                const added = acc.filter(a => a.origin === "manual").length;
+                const manRej = anns.filter(a => a.manually_rejected).length;
+                const mainCount = acc.filter(a => (a.event_class || "MAIN") === "MAIN").length;
+                const secCount = acc.filter(a => a.event_class === "SECONDARY").length;
+                const ambCount = acc.filter(a => a.event_class === "AMBIGUOUS").length;
+                return {
+                    auto: autoAcc,
+                    added: added,
+                    rej: manRej,
+                    final: acc.length,
+                    main: mainCount,
+                    sec: secCount,
+                    amb: ambCount
+                };
+            }     runKey = runKey || currentRun;
             if (pol !== 1 && pol !== -1) {
                 return {auto: 0, added: 0, rej: 0, final: 0};
             }
@@ -963,12 +1020,46 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             return {auto, added, rej, final};
         }
 
-        function getActiveQC(segIdx, activePol, runKey) {
+                function getActiveQC(segIdx, activePol, runKey) {
             const seg = segments_data[segIdx];
             runKey = runKey || currentRun;
 
             const manualRej = userSegmentRejection[segIdx];
             const isManualRejected = manualRej && manualRej.rejected;
+
+            if (isSarcomereMode) {
+                const targetRuns = seg.runs;
+                const run = (targetRuns && targetRuns[runKey]) ? targetRuns[runKey] : ((targetRuns && targetRuns["default"]) ? targetRuns["default"] : null);
+                const autoStatus = run ? run.qc_status : (seg.qc_status || "UNKNOWN");
+                const autoReason = run ? run.qc_reason : (seg.qc_reason || "");
+                if (isManualRejected) {
+                    return {
+                        status: "REJECT",
+                        reason: `manual: ${manualRej.reason}`,
+                        label: `QC: REJECT (manual: ${manualRej.reason}) | Auto: ${autoStatus} (${autoReason})`,
+                        isInputRequired: false,
+                        isZeroContractions: false,
+                        isManualRejection: true,
+                        manualReason: manualRej.reason,
+                        autoStatus: autoStatus,
+                        autoReason: autoReason,
+                        nAccepted: 0
+                    };
+                }
+                const isPass = (autoStatus === "PASS");
+                return {
+                    status: isPass ? "PASS" : "REJECT",
+                    reason: autoReason,
+                    label: `QC: ${isPass ? "PASS" : "REJECT"} (${autoReason})`,
+                    isInputRequired: false,
+                    isZeroContractions: (run ? run.n_accepted === 0 : false),
+                    isManualRejection: false,
+                    manualReason: null,
+                    autoStatus: autoStatus,
+                    autoReason: autoReason,
+                    nAccepted: isPass ? (run ? run.n_accepted : 0) : 0
+                };
+            }
 
             if (activePol !== 1 && activePol !== -1) {
                 if (isManualRejected) {
@@ -1338,6 +1429,62 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 });
             }
 
+            if (isSarcomereMode) {
+                const pCont = document.getElementById("polarity_mode_container");
+                if (pCont) pCont.style.display = "none";
+                const pLbl = document.getElementById("lbl_polarity");
+                if (pLbl) pLbl.style.display = "none";
+                const pInst = document.getElementById("instructions_polarity_text");
+                if (pInst) pInst.style.display = "none";
+                const sInst = document.getElementById("instructions_sarcomere_text");
+                if (sInst) sInst.style.display = "inline";
+                const lArt = document.getElementById("lbl_artifacts");
+                if (lArt) lArt.style.display = "inline-flex";
+                const sLeg = document.getElementById("shape_legend");
+                if (sLeg) sLeg.style.display = "inline";
+                const rText = document.getElementById("lbl_raw_text");
+                if (rText) rText.innerText = "Show raw SarcomereLength";
+                const lRecon = document.getElementById("lbl_reconstruction");
+                if (lRecon) lRecon.style.display = "inline-flex";
+                const chkReconInit = document.getElementById("chk_reconstruction");
+                if (chkReconInit) chkReconInit.addEventListener("change", renderPlot);
+                const chkArt = document.getElementById("chk_artifacts");
+                if (chkArt) chkArt.addEventListener("change", renderPlot);
+                const titleEl = document.getElementById("main_title");
+                if (titleEl) titleEl.innerText = isDualMode ? "Cardiomyocyte Analysis Review (Sarcomere + Calcium)" : "Cardiomyocyte Analysis Review (Sarcomere)";
+                document.title = isDualMode ? "Cardiomyocyte Analysis - Sarcomere + Calcium Review" : "Cardiomyocyte Analysis - Sarcomere Review";
+            }
+
+
+
+            const selClassEl = document.getElementById("peak_class_select");
+            if (selClassEl) {
+                selClassEl.addEventListener("change", e => {
+                    if (!selectedPeakInfo || selectedPeakInfo.segIdx !== currentSegIdx) return;
+                    const newClass = e.target.value;
+                    const polMapKey = selectedPeakInfo.segIdx + "|" + selectedPeakInfo.polKey;
+                    const seg = segments_data[currentSegIdx];
+                    const w = Math.max(1, Math.round(0.04 * seg.fs));
+                    const selIdx = selectedPeakInfo.index;
+                    Object.keys(annotations).forEach(annK => {
+                        if (annK.startsWith(currentSegIdx + "|")) {
+                            const list = annotations[annK];
+                            list.forEach(a => {
+                                if (Math.abs(a.index - selIdx) <= w) {
+                                    a.event_class = newClass;
+                                }
+                            });
+                        }
+                    });
+                    if (manualPeaksByPol[polMapKey] && manualPeaksByPol[polMapKey][selIdx]) {
+                        manualPeaksByPol[polMapKey][selIdx].event_class = newClass;
+                    }
+                    updateSelectedPeakBar(getAnn(currentSegIdx, currentRun, selectedPeakInfo.polKey), selectedPeakInfo.polKey);
+                    updateSummaryTable();
+                    renderPlot();
+                });
+            }
+
             document.getElementById("source_name").innerText = source_workbook;
             document.getElementById("btn_save").addEventListener("click", saveAnnotations);
             document.getElementById("btn_export_overrides").addEventListener("click", exportPolarityOverrides);
@@ -1381,7 +1528,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const sel = document.getElementById("peak_strictness_select");
             const btnRem = document.getElementById("btn_remove_manual_peak");
             if (!lbl || !sel) return;
-            if (!selectedPeakInfo || selectedPeakInfo.segIdx !== currentSegIdx || selectedPeakInfo.polKey !== polKey) {
+                        const lblClass = document.getElementById("lbl_peak_class");
+            const selClass = document.getElementById("peak_class_select");
+            if (lblClass && selClass) {
+                lblClass.style.display = isSarcomereMode ? "inline-flex" : "none";
+            }
+if (!selectedPeakInfo || selectedPeakInfo.segIdx !== currentSegIdx || selectedPeakInfo.polKey !== polKey) {
                 lbl.innerText = "No peak selected (click any marker or choose from dropdown)";
                 sel.value = "inherit";
                 sel.disabled = true;
@@ -1406,7 +1558,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const stateTxt = ev.status;
             const reasonTxt = ev.reason ? ` [Reason: ${ev.reason}]` : "";
             const stageTxt = (ev.detection_stage && ev.detection_stage !== "none") ? ` | Stage: <b>${ev.detection_stage}</b>` : "";
-            lbl.innerHTML = `Selected: <b>t=${ev.time_s.toFixed(3)}s</b> | Amp=<b>${ev.amp == null ? "n/a" : ev.amp.toFixed(4)}</b> | Origin: <b>${originTxt}</b> | Strictness: <b>${strictTxt}</b>${stageTxt} | State: <b>${stateTxt}</b>${reasonTxt ? ` | <b>${reasonTxt}</b>` : ""}`;
+                        if (lblClass && selClass) {
+                selClass.disabled = false;
+                selClass.value = ev.event_class || "MAIN";
+            }
+lbl.innerHTML = `Selected: <b>t=${ev.time_s.toFixed(3)}s</b> | Amp=<b>${ev.amp == null ? "n/a" : ev.amp.toFixed(4)}</b> | Origin: <b>${originTxt}</b> | Strictness: <b>${strictTxt}</b>${stageTxt} | State: <b>${stateTxt}</b>${reasonTxt ? ` | <b>${reasonTxt}</b>` : ""}`;
             sel.disabled = false;
             sel.value = isOverridden ? ev.per_peak_strictness : "inherit";
             if (btnRem) {
@@ -1415,21 +1571,36 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function updateSummaryTable() {
+            const thead = document.querySelector("#summary_table thead");
             const tbody = document.querySelector("#summary_table tbody");
+            if (isSarcomereMode) {
+                thead.innerHTML = `<tr>
+                    <th>Segment</th><th>Sample ID</th><th>QC</th><th>Mode</th><th>Reviewed</th>
+                    <th>Accepted</th><th>MAIN</th><th>SECONDARY</th><th>AMBIGUOUS</th><th>Rate (Hz)</th><th>% Shortening</th>
+                </tr>`;
+            } else {
+                thead.innerHTML = `<tr>
+                    <th>Segment</th><th>Sample ID</th><th>QC</th><th>Polarity</th><th>Reviewed</th>
+                    <th>Accepted (auto)</th><th>Manual additions</th><th>Manually rejected</th><th>Final count</th>
+                </tr>`;
+            }
             tbody.innerHTML = "";
             segments_data.forEach((seg, idx) => {
                 const polInfo = getActivePolarity(idx);
                 const c = countsFor(idx, polInfo.pol);
                 const qc = getActiveQC(idx, polInfo.pol);
                 const tr = document.createElement("tr");
-                let polBadge = "";
-                if (polInfo.pol === 0) {
-                    polBadge = qc.isInputRequired ? '<span style="color:#d9534f; font-weight:bold;">POLARITY INPUT REQUIRED</span>' : '<span style="color:#6c757d;">undetermined (rejected)</span>';
-                } else if (polInfo.pol > 0) {
-                    polBadge = `+1 (up) ${polInfo.isOverride ? '<span style="color:#0275d8; font-weight:bold;">[override]</span>' : '<span style="color:#5cb85c;">[auto]</span>'}`;
-                } else {
-                    polBadge = `-1 (down) ${polInfo.isOverride ? '<span style="color:#0275d8; font-weight:bold;">[override]</span>' : '<span style="color:#5cb85c;">[auto]</span>'}`;
+                tr.style.cursor = "pointer";
+                if (idx === currentSegIdx) {
+                    tr.style.backgroundColor = "#e8f0fe";
                 }
+                tr.onclick = () => {
+                    currentSegIdx = idx;
+                    document.getElementById("segment_select").value = idx;
+                    populateSegmentSelector();
+                    renderPlot();
+                    updateSummaryTable();
+                };
 
                 let qcHtml = "";
                 if (qc.isManualRejection) {
@@ -1444,10 +1615,33 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     qcHtml = `<span style="color:#28a745; font-weight:bold;">PASS (${qc.reason})</span>`;
                 }
 
-                tr.innerHTML = `<td>${seg.sheet_name}</td><td>${seg.sample_id}</td>
-                    <td>${qcHtml}</td>
-                    <td>${polBadge}</td><td>${segmentReviewed[idx] ? "yes" : "no"}</td>
-                    <td>${c.auto}</td><td>${c.added}</td><td>${c.rej}</td><td>${c.final}</td>`;
+                if (isSarcomereMode) {
+                    const targetRuns = seg.runs;
+                    const run = (targetRuns && targetRuns[currentRun]) ? targetRuns[currentRun] : ((targetRuns && targetRuns["default"]) ? targetRuns["default"] : {});
+                    const isPass = (qc.status === "PASS");
+                    const rateTxt = (isPass && c.final > 1 && run.frequency_hz != null) ? `${run.frequency_hz.toFixed(2)} Hz` : "N/A";
+                    const shortTxt = (isPass && c.final > 0 && run.mean_pct_shortening != null) ? `${run.mean_pct_shortening.toFixed(2)}%` : "N/A";
+
+                    tr.innerHTML = `<td><b>${seg.sheet_name}</b></td><td>${seg.sample_id}</td>
+                        <td>${qcHtml}</td>
+                        <td>${seg.analysis_mode}</td><td>${segmentReviewed[idx] ? "yes" : "no"}</td>
+                        <td><b>${c.final}</b></td><td>${c.main}</td><td>${c.sec}</td><td>${c.amb}</td>
+                        <td>${rateTxt}</td><td>${shortTxt}</td>`;
+                } else {
+                    let polBadge = "";
+                    if (polInfo.pol === 0) {
+                        polBadge = qc.isInputRequired ? '<span style="color:#d9534f; font-weight:bold;">POLARITY INPUT REQUIRED</span>' : '<span style="color:#6c757d;">undetermined (rejected)</span>';
+                    } else if (polInfo.pol > 0) {
+                        polBadge = `+1 (up) ${polInfo.isOverride ? '<span style="color:#0275d8; font-weight:bold;">[override]</span>' : '<span style="color:#5cb85c;">[auto]</span>'}`;
+                    } else {
+                        polBadge = `-1 (down) ${polInfo.isOverride ? '<span style="color:#0275d8; font-weight:bold;">[override]</span>' : '<span style="color:#5cb85c;">[auto]</span>'}`;
+                    }
+
+                    tr.innerHTML = `<td>${seg.sheet_name}</td><td>${seg.sample_id}</td>
+                        <td>${qcHtml}</td>
+                        <td>${polBadge}</td><td>${segmentReviewed[idx] ? "yes" : "no"}</td>
+                        <td>${c.auto}</td><td>${c.added}</td><td>${c.rej}</td><td>${c.final}</td>`;
+                }
                 tbody.appendChild(tr);
             });
         }
@@ -1490,7 +1684,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             let ampArr = null;
             let baseArr = null;
 
-            if (!isUndet && seg.orientations && seg.orientations[polKey]) {
+            if (isSarcomereMode) {
+                const targetRuns = seg.runs;
+                run = (targetRuns && targetRuns[currentRun]) ? targetRuns[currentRun] : ((targetRuns && targetRuns["default"]) ? targetRuns["default"] : {params: {}, reference_amplitude: null, amplitude_threshold: null, noise_sigma: null, events: {index:[]}});
+                ampArr = baseSig.pct_shortening;
+                baseArr = baseSig.l0_baseline;
+            } else if (!isUndet && seg.orientations && seg.orientations[polKey]) {
                 const oData = seg.orientations[polKey];
                 const oArrays = getOrientationArrays(currentSegIdx, polKey);
                 ampArr = oArrays.amp;
@@ -1535,7 +1734,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const calR = seg.cal_runs[currentRun];
                 const calQCColor = calR.qc_status === "PASS" ? "#28a745" : "#dc3545";
                 const calRateStr = (calR.qc_status === "PASS" && calR.frequency_hz !== null) ? `${calR.frequency_hz.toFixed(2)} Hz (${calR.frequency_bpm.toFixed(1)} BPM)` : "N/A";
-                auxInfo += ` | <span style="font-weight:bold; color:firebrick;">Ca2+:</span> <span style="color:${calQCColor}; font-weight:bold;">${calR.qc_status} (${calR.qc_reason})</span>, Rate: ${calRateStr}`;
+                auxInfo += ` | <span style="font-weight:bold; color:black;">Ca2+:</span> <span style="color:${calQCColor}; font-weight:bold;">${calR.qc_status} (${calR.qc_reason})</span>, Rate: ${calRateStr}`;
             } else if (seg.length_cal && seg.length_cal > 0) {
                 auxInfo += ` | Calcium: ${seg.length_cal} pts`;
             } else if (seg.cal_status === "empty_sheet") {
@@ -1545,9 +1744,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 auxInfo += ` | Intensity: ${seg.length_int} pts`;
             }
 
-            document.getElementById("segment_info").innerHTML =
-                `Sample ID: ${seg.sample_id} | ${seg.length} pts | fs: ${seg.fs} Hz | t0: ${seg.t0.toFixed(3)} s | ` +
-                `raw polarity: ${polTxt}${auxInfo} | ${qcHeaderTxt}`;
+            if (isSarcomereMode) {
+                const calAssistTxt = "";
+                document.getElementById("segment_info").innerHTML =
+                    `Sample ID: ${seg.sample_id} | ${seg.length} pts | fs: ${seg.fs} Hz | t0: ${seg.t0.toFixed(3)} s | ` +
+                    `Mode: <b>${seg.analysis_mode}</b>${calAssistTxt} | ${qcHeaderTxt}`;
+            } else {
+                document.getElementById("segment_info").innerHTML =
+                    `Sample ID: ${seg.sample_id} | ${seg.length} pts | fs: ${seg.fs} Hz | t0: ${seg.t0.toFixed(3)} s | ` +
+                    `raw polarity: ${polTxt}${auxInfo} | ${qcHeaderTxt}`;
+            }
 
             const fb = document.getElementById("fail_box");
             if (qc.isManualRejection) {
@@ -1615,7 +1821,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             const isCalciumMode = (seg.analysis_mode === "calcium");
 
-            if (isCalciumMode) {
+            if (isSarcomereMode) {
+                const durTxt = (run.analyzable_duration_s != null) ? `${run.analyzable_duration_s.toFixed(2)}s` : "n/a";
+                const tMainTxt = (run.threshold_main_pct != null) ? `${run.threshold_main_pct.toFixed(2)}%` : ((run.amplitude_threshold != null) ? `${run.amplitude_threshold.toFixed(2)}%` : "n/a");
+                const tSceTxt = (run.threshold_sce_pct != null) ? `${run.threshold_sce_pct.toFixed(2)}%` : "n/a";
+                const aRefTxt = (run.reference_amplitude_pct != null) ? `${run.reference_amplitude_pct.toFixed(2)}%` : "n/a";
+                const noisePctTxt = (run.noise_sigma_pct != null) ? `${run.noise_sigma_pct.toFixed(3)}%` : "n/a";
+                const noiseUmTxt = (run.noise_sigma != null) ? `${run.noise_sigma.toExponential(2)} µm` : (run.noise_sigma_um != null ? `${run.noise_sigma_um.toExponential(2)} µm` : "n/a");
+                const rateTxt = (run.frequency_hz != null && !isQCFailed) ? `${run.frequency_hz.toFixed(2)} Hz (${run.frequency_bpm.toFixed(1)} BPM)` : "N/A";
+                const orderTxt = run.threshold_ordering_status || "distinct";
+                const assistTxt = "";
+
+                document.getElementById("param_box").innerText =
+                    `Sarcomere Shortening [${currentRun.toUpperCase()}]: ` +
+                    `T_MAIN=${tMainTxt}  T_SCE=${tSceTxt} (ordering: ${orderTxt})  |  ` +
+                    `A_ref=${aRefTxt}  Noise sigma=${noisePctTxt} (${noiseUmTxt})  |  ` +
+                    `Rate=${rateTxt}  Duration=${durTxt}${assistTxt}`;
+            } else if (isCalciumMode) {
                 const s1Amp = (run.stage1_amplitude_criterion != null) ? run.stage1_amplitude_criterion.toFixed(4) : ((run.amplitude_threshold != null) ? run.amplitude_threshold.toFixed(4) : "n/a");
                 const refAmp = (run.reference_amplitude != null) ? run.reference_amplitude.toFixed(4) : "n/a";
                 const effProm = (run.effective_prominence != null) ? run.effective_prominence.toFixed(4) : "n/a";
@@ -1655,18 +1877,41 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
 
             const panels = [];
-            if (hasAmp) panels.push({
-                key: "amp",
-                title: isCalciumMode ? "Calcium amplitude ΔR/R₀<br>(relative to resting baseline R₀)" : "Contraction amplitude A<br>(relative to resting baseline)",
-                weight: 3
-            });
-            if (showRaw) panels.push({
-                key: "raw",
-                title: isCalciumMode ? "Raw RatioMetricCalcium (R)" : "Raw PixelCorrelation",
-                weight: 2
-            });
-            if (baseSig.inten) panels.push({key: "int", title: "PixelIntensity", weight: 1.2});
-            if (baseSig.cal && !isCalciumMode) panels.push({key: "cal", title: "RatioMetricCalcium (R)", weight: 1.2});
+            if (isSarcomereMode) {
+                if (showRaw) {
+                    panels.push({
+                        key: "raw",
+                        title: "Original SarcomereLength (µm)",
+                        weight: 2
+                    });
+                }
+                if (hasAmp) {
+                    panels.push({
+                        key: "amp",
+                        title: "Normalized Shortening (% ΔL/L0)",
+                        weight: 3
+                    });
+                }
+                if (isDualMode && baseSig.cal) {
+                    panels.push({
+                        key: "cal",
+                        title: isSarcomereMode ? "RatioMetricCalcium (ΔR/R₀)" : "RatioMetricCalcium",
+                        weight: 2
+                    });
+                }
+            } else {
+                if (showRaw) panels.push({
+                    key: "raw",
+                    title: isCalciumMode ? "Raw RatioMetricCalcium (R)" : "Raw PixelCorrelation",
+                    weight: 2
+                });
+                if (hasAmp) panels.push({
+                    key: "amp",
+                    title: isCalciumMode ? "Calcium amplitude ΔR/R₀<br>(relative to resting baseline R₀)" : "Contraction amplitude A<br>(relative to resting baseline)",
+                    weight: 3
+                });
+                if (baseSig.cal && !isCalciumMode) panels.push({key: "cal", title: "RatioMetricCalcium (R)", weight: 1.2});
+            }
 
             const totalW = panels.reduce((s, q) => s + q.weight, 0);
             const gap = 0.04;
@@ -1680,48 +1925,226 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             const traces = [];
             if (P.amp && ampArr) {
-                traces.push({x: times, y: ampArr, mode: "lines", name: isCalciumMode ? "ΔR/R₀ amplitude" : "amplitude", line: {color: "black", width: 1},
+                traces.push({x: times, y: ampArr, mode: "lines", name: isSarcomereMode ? "Shortening (%)" : (isCalciumMode ? "ΔR/R₀ amplitude" : "amplitude"), line: {color: "black", width: 1},
                              yaxis: P.amp.ax, xaxis: "x", hoverinfo: "x+y", connectgaps: false});
                 traces.push({x: [times[0], times[times.length - 1]], y: [0, 0], mode: "lines",
-                             name: isCalciumMode ? "resting baseline (ΔR/R₀ = 0)" : "resting baseline (A = 0)", line: {color: "gray", width: 1}, yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
-                if (run.amplitude_threshold !== null && run.amplitude_threshold !== undefined) {
+                             name: isSarcomereMode ? "resting baseline (0%)" : (isCalciumMode ? "resting baseline (ΔR/R0 = 0)" : "resting baseline (A = 0)"), line: {color: "gray", width: 1}, yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
+                if (isSarcomereMode) {
+                    const tMain = run.threshold_main_pct != null ? run.threshold_main_pct : run.amplitude_threshold;
+                    const tSce = run.threshold_sce_pct;
+                    const isCollapsed = (run.threshold_ordering_status === "collapsed" || tMain === tSce || tSce == null);
+                    if (isCollapsed) {
+                        const effThr = (tSce != null) ? tSce : tMain;
+                        if (effThr != null) {
+                            traces.push({x: [times[0], times[times.length - 1]], y: [effThr, effThr],
+                                         mode: "lines", name: "Contraction threshold (%)", line: {color: "orange", dash: "dash", width: 1.5},
+                                         yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
+                        }
+                    } else {
+                        if (tMain != null) {
+                            traces.push({x: [times[0], times[times.length - 1]], y: [tMain, tMain],
+                                         mode: "lines", name: "MAIN threshold (%)", line: {color: "orange", dash: "dash", width: 1.5},
+                                         yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
+                        }
+                        if (tSce != null) {
+                            traces.push({x: [times[0], times[times.length - 1]], y: [tSce, tSce],
+                                         mode: "lines", name: "SECONDARY threshold (%)", line: {color: "#6f42c1", dash: "dot", width: 1.5},
+                                         yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
+                        }
+                    }
+                } else if (run.amplitude_threshold !== null && run.amplitude_threshold !== undefined) {
                     traces.push({x: [times[0], times[times.length - 1]], y: [run.amplitude_threshold, run.amplitude_threshold],
-                                 mode: "lines", name: isCalciumMode ? "Stage 1 amplitude criterion (ΔR/R₀)" : "major-contraction threshold", line: {color: "orange", dash: "dash", width: 1.2},
+                                 mode: "lines", name: isSarcomereMode ? "shortening threshold (%)" : (isCalciumMode ? "Stage 1 amplitude criterion (ΔR/R0)" : "major-contraction threshold"), line: {color: "orange", dash: "dash", width: 1.2},
                                  yaxis: P.amp.ax, xaxis: "x", hoverinfo: "skip"});
                 }
             }
             if (P.raw) {
-                traces.push({x: times, y: baseSig.raw, mode: "lines", name: isCalciumMode ? "Raw RatioMetricCalcium" : "raw PixelCorrelation", line: {color: isCalciumMode ? "firebrick" : "blue", width: 1},
+                traces.push({x: times, y: baseSig.raw, mode: "lines", name: isSarcomereMode ? "raw SarcomereLength" : "raw PixelCorrelation", line: {color: "blue", width: 1},
                              yaxis: P.raw.ax, xaxis: "x", connectgaps: false});
-                if (baseArr) traces.push({x: times, y: baseArr, mode: "lines", name: isCalciumMode ? "Resting baseline R₀" : "resting baseline B_raw",
-                             line: {color: "gray", dash: "dot", width: 1.2}, yaxis: P.raw.ax, xaxis: "x", hoverinfo: "skip"});
+                if (isSarcomereMode && baseSig.l0_baseline) {
+                    traces.push({x: times, y: baseSig.l0_baseline, mode: "lines", name: "diastolic baseline L0", line: {color: "gray", dash: "dot", width: 1.2},
+                                 yaxis: P.raw.ax, xaxis: "x", hoverinfo: "skip"});
+                }
+                const chkRecon = document.getElementById("chk_reconstruction");
+                if (isSarcomereMode && chkRecon && chkRecon.checked && seg.reconstruction && seg.reconstruction.reconstructed_intervals && seg.reconstruction.reconstructed_intervals.length > 0) {
+                    seg.reconstruction.reconstructed_intervals.forEach(iv => {
+                        const t0 = (iv.start_time_s != null) ? iv.start_time_s : (iv.start_sample / (seg.fs || 100.0));
+                        const t1 = (iv.end_time_s != null) ? iv.end_time_s : (iv.end_sample / (seg.fs || 100.0));
+                        const durMs = (iv.duration_ms != null) ? iv.duration_ms : ((t1 - t0) * 1000.0);
+                        traces.push({
+                            x: [t0, t1, t1, t0, t0],
+                            y: [0, 0, 5, 5, 0],
+                            fill: "toself",
+                            fillcolor: "rgba(255, 165, 0, 0.25)",
+                            line: {color: "rgba(255, 140, 0, 0.8)", width: 1.2, dash: "dot"},
+                            mode: "lines",
+                            name: `Reconstructed interval (${durMs.toFixed(1)}ms)`,
+                            yaxis: P.raw.ax,
+                            xaxis: "x",
+                            hoverinfo: "text",
+                            text: `Reconstructed tracking spike: [${t0.toFixed(3)}s - ${t1.toFixed(3)}s] (${durMs.toFixed(1)}ms)`,
+                            showlegend: false
+                        });
+                    });
+                }
+                const chkArt = document.getElementById("chk_artifacts");
+                if (isSarcomereMode && chkArt && chkArt.checked && seg.artifact_intervals && seg.artifact_intervals.length > 0) {
+                    seg.artifact_intervals.forEach(iv => {
+                        traces.push({
+                            x: [iv.start_s, iv.end_s, iv.end_s, iv.start_s, iv.start_s],
+                            y: [0, 0, 5, 5, 0],
+                            fill: "toself",
+                            fillcolor: "rgba(180, 180, 180, 0.35)",
+                            line: {color: "rgba(140, 140, 140, 0.6)", width: 1, dash: "dot"},
+                            mode: "lines",
+                            name: `Tracking artifact (${iv.type || "spike"})`,
+                            yaxis: P.raw.ax,
+                            xaxis: "x",
+                            hoverinfo: "text",
+                            text: `Artifact: ${iv.type || "spike"} [${iv.start_s.toFixed(3)}s - ${iv.end_s.toFixed(3)}s]`,
+                            showlegend: false
+                        });
+                    });
+                }
             }
             if (P.int && baseSig.inten) traces.push({x: timesForInt(seg), y: baseSig.inten, mode: "lines", name: "PixelIntensity", line: {color: "green", width: 1}, yaxis: P.int.ax, xaxis: "x", connectgaps: false});
             if (P.cal && baseSig.cal) {
-                traces.push({x: timesForCal(seg), y: baseSig.cal, mode: "lines", name: "RatioMetricCalcium", line: {color: "firebrick", width: 1}, yaxis: P.cal.ax, xaxis: "x", connectgaps: false});
-                if (baseSig.base_cal) {
-                    traces.push({x: timesForCal(seg), y: baseSig.base_cal, mode: "lines", name: "Resting baseline R₀", line: {color: "gray", dash: "dot", width: 1.2}, yaxis: P.cal.ax, xaxis: "x", hoverinfo: "skip"});
+                const calTimes = timesForCal(seg);
+                if (isSarcomereMode) {
+                    // Normalized calcium signal: ΔR/R0 = (R(t) - R0(t)) / R0(t) in BLACK
+                    const normCal = new Float32Array(baseSig.cal.length);
+                    for (let k = 0; k < baseSig.cal.length; k++) {
+                        const b = (baseSig.base_cal && baseSig.base_cal[k] > 0.05) ? baseSig.base_cal[k] : 1.0;
+                        normCal[k] = (baseSig.cal[k] - b) / b;
+                    }
+                    traces.push({
+                        x: calTimes, y: normCal, mode: "lines", name: "RatioMetricCalcium (ΔR/R₀)",
+                        line: {color: "black", width: 1}, yaxis: P.cal.ax, xaxis: "x", connectgaps: false
+                    });
+                    // Resting baseline at y = 0
+                    traces.push({
+                        x: [calTimes[0], calTimes[calTimes.length - 1]],
+                        y: [0, 0],
+                        mode: "lines", name: "Resting baseline (0)",
+                        line: {color: "gray", dash: "dot", width: 1.2},
+                        yaxis: P.cal.ax, xaxis: "x", hoverinfo: "skip"
+                    });
+                    if (seg.cal_runs) {
+                        const calR = seg.cal_runs[currentRun] || seg.cal_runs["default"];
+                        if (calR) {
+                            const tMain = calR.threshold_main;
+                            const tSce = calR.threshold_sce;
+                            if (tMain !== null && tMain !== undefined && !isNaN(tMain)) {
+                                traces.push({
+                                    x: [calTimes[0], calTimes[calTimes.length - 1]],
+                                    y: [tMain, tMain],
+                                    mode: "lines", name: `T_MAIN Ca2+ (${tMain.toFixed(3)})`,
+                                    line: {color: "#fd7e14", dash: "dash", width: 1.5},
+                                    yaxis: P.cal.ax, xaxis: "x", hoverinfo: "skip"
+                                });
+                            }
+                            if (tSce !== null && tSce !== undefined && !isNaN(tSce)) {
+                                traces.push({
+                                    x: [calTimes[0], calTimes[calTimes.length - 1]],
+                                    y: [tSce, tSce],
+                                    mode: "lines", name: `T_SCE Ca2+ (${tSce.toFixed(3)})`,
+                                    line: {color: "#6f42c1", dash: "dot", width: 1.5},
+                                    yaxis: P.cal.ax, xaxis: "x", hoverinfo: "skip"
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    // Non-sarcomere mode: raw calcium signal in BLACK
+                    traces.push({
+                        x: calTimes, y: baseSig.cal, mode: "lines", name: "RatioMetricCalcium",
+                        line: {color: "black", width: 1}, yaxis: P.cal.ax, xaxis: "x", connectgaps: false
+                    });
+                    if (baseSig.base_cal) {
+                        traces.push({
+                            x: calTimes, y: baseSig.base_cal, mode: "lines", name: "Resting baseline R₀",
+                            line: {color: "gray", dash: "dot", width: 1.2}, yaxis: P.cal.ax, xaxis: "x", hoverinfo: "skip"
+                        });
+                    }
                 }
+
                 if (seg.cal_runs) {
                     const calList = getCalAnn(currentSegIdx, currentRun);
                     const calR = seg.cal_runs[currentRun] || seg.cal_runs["default"];
                     const calQC = calR ? calR.qc_status : "PASS";
                     const calReason = calR ? calR.qc_reason : "";
-                    if (calQC !== "PASS") {
+                    const isCalQCFailed = (calQC !== "PASS");
+
+                    if (isCalQCFailed) {
                         if (showPrelimDiag) {
                             const calDiag = calList.filter(a => a.status === "ACCEPTED" || a.original_status === "ACCEPTED");
                             if (calDiag.length > 0) {
+                                const yVals = isSarcomereMode ? calDiag.map(a => a.amp) : calDiag.map(a => a.raw);
                                 traces.push({
-                                    x: calDiag.map(a => a.time_s), y: calDiag.map(a => a.raw),
+                                    x: calDiag.map(a => a.time_s), y: yVals,
                                     customdata: calDiag.map(a => a.cal_idx),
-                                    text: calDiag.map(a => `t=${a.time_s.toFixed(3)} s<br>Ca2+ raw=${a.raw.toFixed(4)}<br>EXCLUDED (Calcium QC ${calQC}: ${calReason})`),
+                                    text: calDiag.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>EXCLUDED (Calcium QC ${calQC}: ${calReason})`),
                                     hoverinfo: "text", mode: "markers", name: "Calcium diagnostic candidates",
                                     marker: {color: "#888888", size: 8, symbol: "circle-open"}, opacity: 0.65,
                                     yaxis: P.cal.ax, xaxis: "x", type: "scatter"
                                 });
                             }
                         }
+                    } else if (isSarcomereMode) {
+                        // Sarcomere-calcium mode: adult dual-threshold classification markers (MAIN=green circle, SECONDARY=purple diamond)
+                        const calAutoMain = calList.filter(a => a.status === "ACCEPTED" && a.origin !== "manual" && (a.event_class || "MAIN") === "MAIN");
+                        const calAutoSec = calList.filter(a => a.status === "ACCEPTED" && a.origin !== "manual" && a.event_class === "SECONDARY");
+                        const calManAcc = calList.filter(a => a.status === "ACCEPTED" && a.origin === "manual");
+                        const calManRej = calList.filter(a => a.status === "REJECTED" && a.manually_rejected);
+
+                        if (calAutoMain.length > 0) {
+                            traces.push({
+                                x: calAutoMain.map(a => a.time_s), y: calAutoMain.map(a => a.amp),
+                                customdata: calAutoMain.map(a => a.cal_idx),
+                                text: calAutoMain.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Calcium MAIN (accepted)`),
+                                hoverinfo: "text", mode: "markers", name: `Calcium MAIN (${calAutoMain.length})`,
+                                marker: {color: "#28a745", size: 10, symbol: "circle"},
+                                yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                            });
+                        }
+                        if (calAutoSec.length > 0) {
+                            traces.push({
+                                x: calAutoSec.map(a => a.time_s), y: calAutoSec.map(a => a.amp),
+                                customdata: calAutoSec.map(a => a.cal_idx),
+                                text: calAutoSec.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Calcium SECONDARY (accepted)`),
+                                hoverinfo: "text", mode: "markers", name: `Calcium SECONDARY (${calAutoSec.length})`,
+                                marker: {color: "#6f42c1", size: 10, symbol: "diamond"},
+                                yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                            });
+                        }
+                        if (calManAcc.length > 0) {
+                            ["MAIN", "SECONDARY"].forEach(cls => {
+                                const sym = (cls === "MAIN") ? "circle" : "diamond";
+                                const mList = calManAcc.filter(a => (a.event_class || "MAIN") === cls);
+                                if (mList.length > 0) {
+                                    traces.push({
+                                        x: mList.map(a => a.time_s), y: mList.map(a => a.amp),
+                                        customdata: mList.map(a => a.cal_idx),
+                                        text: mList.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Manually added calcium ${cls} (click to delete)`),
+                                        hoverinfo: "text", mode: "markers", name: `Calcium manual ${cls} (${mList.length})`,
+                                        marker: {color: "#007bff", size: 10, symbol: sym, line: {color: "#004085", width: 1.5}},
+                                        yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                                    });
+                                }
+                            });
+                        }
+                        if (calManRej.length > 0) {
+                            traces.push({
+                                x: calManRej.map(a => a.time_s), y: calManRej.map(a => a.amp),
+                                customdata: calManRej.map(a => a.cal_idx),
+                                text: calManRej.map(a => `t=${a.time_s.toFixed(3)} s<br>ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)}, R₀=${a.base == null ? "n/a" : a.base.toFixed(4)})<br>Rejected calcium transient (click to restore)`),
+                                hoverinfo: "text", mode: "markers", name: `Calcium rejected (${calManRej.length})`,
+                                marker: {color: "#dc3545", size: 10, symbol: "x", line: {color: "#a71d2a", width: 1.5}},
+                                yaxis: P.cal.ax, xaxis: "x", type: "scatter"
+                            });
+                        }
                     } else {
+                        // Standard non-sarcomere mode (PixelCorrelation review)
                         const calAutoAcc = calList.filter(a => a.status === "ACCEPTED" && a.origin !== "manual");
                         const calManAcc = calList.filter(a => a.status === "ACCEPTED" && a.origin === "manual");
                         const calManRej = calList.filter(a => a.status === "REJECTED" && a.manually_rejected);
@@ -1768,7 +2191,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const xs = [], ys = [], cd = [], tx = [];
                 anns.forEach((a, i) => {
                     if (!predicateFn(a)) return;
-                    const y = a[yField]; if (y === null || y === undefined) return;
+                    const y = (a[yField] !== null && a[yField] !== undefined && !isNaN(a[yField])) ? a[yField] : ((yField === "amp" && a.display_amplitude != null) ? a.display_amplitude : (yField === "amp" ? a.pct_shortening : null));
+                    if (y === null || y === undefined || isNaN(y)) return;
                     xs.push(a.time_s); ys.push(y); cd.push(i);
                     const strictTag = (a.per_peak_strictness && a.per_peak_strictness !== "inherit")
                         ? ` [per-peak strictness: ${a.per_peak_strictness}]`
@@ -1791,7 +2215,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         }
                         sourceText = a.status + (a.reason ? ": " + a.reason : "") + stageInfo + strictTag;
                     }
-                    const ampLabel = isCalciumMode ? `ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)})` : `A=${a.amp == null ? "n/a" : a.amp.toFixed(4)}`;
+                    let ampLabel = "";
+                    if (isCalciumMode) {
+                        ampLabel = `ΔR/R₀=${a.amp == null ? "n/a" : a.amp.toFixed(4)}<br>ΔR=${a.delta_r == null ? "n/a" : a.delta_r.toFixed(4)} (R=${a.raw.toFixed(4)})`;
+                    } else if (isSarcomereMode) {
+                        if (a.amp == null || isNaN(a.amp)) {
+                            ampLabel = `Shortening: N/A (artifact-interrupted trough; timing recovered)<br>Bound: ≥${y.toFixed(2)}%`;
+                        } else {
+                            ampLabel = `Shortening: ${a.amp.toFixed(2)}%`;
+                        }
+                    } else {
+                        ampLabel = `A=${a.amp == null ? "n/a" : a.amp.toFixed(4)}`;
+                    }
                     tx.push(`t=${a.time_s.toFixed(3)} s<br>${ampLabel}<br>${sourceText}`);
                 });
                 traces.push(Object.assign({x: xs, y: ys, customdata: cd, text: tx, hoverinfo: "text", mode: "markers", name: name,
@@ -1801,15 +2236,59 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (!isUndet && hasAmp) {
                 if (isQCFailed || qc.isManualRejection) {
                     // Segment failed QC or was manually rejected: NO GREEN or BLUE accepted markers may appear!
-                    if (showPrelimDiag || qc.isManualRejection) {
+                    // In standard mode: ZERO markers rendered on the plot!
+                    if (showPrelimDiag) {
                         const predPrelim = a => (a.diagnostic_status === "ACCEPTED" || a.status === "ACCEPTED");
                         customMarkerTrace(predPrelim, "amp", "amp", {marker: {color: "#888888", size: 8, symbol: "circle-open"}, opacity: 0.65}, "EXCLUDED preliminary candidates (diagnostic)");
-                        customMarkerTrace(predPrelim, "raw", "raw", {marker: {color: "#888888", size: 7, symbol: "circle-open"}, opacity: 0.65, showlegend: false}, "EXCLUDED (raw)");
+                        if (!isSarcomereMode) {
+                            customMarkerTrace(predPrelim, "raw", "raw", {marker: {color: "#888888", size: 7, symbol: "circle-open"}, opacity: 0.65, showlegend: false}, "EXCLUDED (raw)");
+                        }
                     }
                     if (showRej) {
                         const predDiagRej = a => (a.diagnostic_status !== "ACCEPTED" && a.status !== "ACCEPTED");
                         customMarkerTrace(predDiagRej, "amp", "amp", {marker: {color: "#dc3545", size: 8, symbol: "x"}, opacity: 0.65}, "REJECTED candidates (diagnostic)");
-                        customMarkerTrace(predDiagRej, "raw", "raw", {marker: {color: "#dc3545", size: 8, symbol: "x"}, opacity: 0.65, showlegend: false}, "REJECTED (raw)");
+                        if (!isSarcomereMode) {
+                            customMarkerTrace(predDiagRej, "raw", "raw", {marker: {color: "#dc3545", size: 8, symbol: "x"}, opacity: 0.65, showlegend: false}, "REJECTED (raw)");
+                        }
+                    }
+                } else if (isSarcomereMode) {
+                    // QC PASS segment in Sarcomere mode:
+                    // Contraction classification shapes: MAIN = circle, SECONDARY = diamond, AMBIGUOUS = triangle-up
+                    const nAutoMain = anns.filter(a => a.status === "ACCEPTED" && a.origin !== "manual" && (a.event_class || "MAIN") === "MAIN").length;
+                    const nAutoSec = anns.filter(a => a.status === "ACCEPTED" && a.origin !== "manual" && a.event_class === "SECONDARY").length;
+                    const nAutoAmb = anns.filter(a => a.status === "ACCEPTED" && a.origin !== "manual" && a.event_class === "AMBIGUOUS").length;
+                    const nManual = anns.filter(a => a.status === "ACCEPTED" && a.origin === "manual").length;
+                    const nManRej = anns.filter(a => a.status === "REJECTED" && a.manually_rejected).length;
+
+                    if (nAutoMain > 0) {
+                        customMarkerTrace(a => a.status === "ACCEPTED" && a.origin !== "manual" && (a.event_class || "MAIN") === "MAIN", "amp", "amp",
+                            {marker: {color: "#28a745", size: 10, symbol: "circle"}}, `Auto accepted MAIN (${nAutoMain})`);
+                    }
+                    if (nAutoSec > 0) {
+                        customMarkerTrace(a => a.status === "ACCEPTED" && a.origin !== "manual" && a.event_class === "SECONDARY", "amp", "amp",
+                            {marker: {color: "#6f42c1", size: 10, symbol: "diamond"}}, `Auto accepted SECONDARY (${nAutoSec})`);
+                    }
+                    if (nAutoAmb > 0) {
+                        customMarkerTrace(a => a.status === "ACCEPTED" && a.origin !== "manual" && a.event_class === "AMBIGUOUS", "amp", "amp",
+                            {marker: {color: "#28a745", size: 10, symbol: "triangle-up"}}, `Auto accepted AMBIGUOUS (${nAutoAmb})`);
+                    }
+                    if (nManual > 0) {
+                        ["MAIN", "SECONDARY", "AMBIGUOUS"].forEach(cls => {
+                            const sym = (cls === "MAIN") ? "circle" : (cls === "SECONDARY" ? "diamond" : "triangle-up");
+                            const countCls = anns.filter(a => a.status === "ACCEPTED" && a.origin === "manual" && (a.event_class || "MAIN") === cls).length;
+                            if (countCls > 0) {
+                                customMarkerTrace(a => a.status === "ACCEPTED" && a.origin === "manual" && (a.event_class || "MAIN") === cls, "amp", "amp",
+                                    {marker: {color: "#007bff", size: 10, symbol: sym, line: {color: "#004085", width: 1.5}}}, `Manually added ${cls} (${countCls})`);
+                            }
+                        });
+                    }
+                    if (nManRej > 0) {
+                        customMarkerTrace(a => a.status === "REJECTED" && a.manually_rejected, "amp", "amp",
+                            {marker: {color: "#dc3545", size: 11, symbol: "x", line: {color: "#dc3545", width: 2.2}}}, `User-rejected auto peaks (${nManRej})`);
+                    }
+                    if (showRej) {
+                        customMarkerTrace(a => a.status === "REJECTED" && !a.manually_rejected, "amp", "amp",
+                            {marker: {color: "#dc3545", size: 8, symbol: "x"}, opacity: 0.5}, "Detector rejected candidates");
                     }
                 } else {
                     const nAutoAcc = anns.filter(a => a.status === "ACCEPTED" && a.origin !== "manual").length;
@@ -1839,6 +2318,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             {marker: {color: "#888888", size: 8, symbol: "circle-open"}, showlegend: false}, "Excluded (raw)");
                     }
                 }
+
                 // Highlight currently selected peak for per-peak strictness
                 if (selectedPeakInfo && selectedPeakInfo.segIdx === currentSegIdx && selectedPeakInfo.polKey === polKey && P.amp) {
                     const w = Math.max(1, Math.round(0.04 * seg.fs));
@@ -1897,7 +2377,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     const t0Cal = (seg.t0_cal !== null && seg.t0_cal !== undefined) ? seg.t0_cal : seg.t0;
                     const wCal = Math.max(1, Math.round(0.04 * fsCal));
 
-                    if (name.startsWith("Calcium accepted") || name.startsWith("Calcium rejected") || name.startsWith("Calcium manual")) {
+                    if (name.startsWith("Calcium accepted") || name.startsWith("Calcium rejected") || name.startsWith("Calcium manual") || name.startsWith("Calcium MAIN") || name.startsWith("Calcium SECONDARY")) {
                         const targetCalIdx = pt.customdata;
                         const a = calList.find(item => item.cal_idx === targetCalIdx) || calList.find(item => Math.abs(item.time_s - pt.x) <= 0.04);
                         if (a) {
@@ -1922,7 +2402,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             renderPlot();
                             return;
                         }
-                    } else if (name === "RatioMetricCalcium" && baseSig.cal) {
+} else if ((name === "RatioMetricCalcium" || name.startsWith("RatioMetricCalcium")) && baseSig.cal) {
                         // User clicked on the calcium line trace -> add a manual calcium peak
                         const clickTime = pt.x;
                         const approxIdx = Math.round((clickTime - t0Cal) * fsCal);
@@ -1948,7 +2428,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             }
                         } else {
                             const bVal = baseSig.base_cal ? baseSig.base_cal[bestIdx] : (baseSig.cal[bestIdx] * 0.5);
-                            const newAmp = baseSig.cal[bestIdx] - bVal;
+                            const rawPeak = baseSig.cal[bestIdx];
+                            const deltaR = rawPeak - bVal;
+                            const normAmp = deltaR / Math.max(0.05, bVal);
+                            const calR = (seg.cal_runs && (seg.cal_runs[currentRun] || seg.cal_runs["default"])) ? (seg.cal_runs[currentRun] || seg.cal_runs["default"]) : null;
+                            const tMainVal = (calR && calR.threshold_main != null) ? calR.threshold_main : 0.22;
+                            const evClass = (normAmp >= tMainVal) ? "MAIN" : "SECONDARY";
                             ["default", "permissive", "strict"].forEach(rKey => {
                                 const rList = getCalAnn(currentSegIdx, rKey);
                                 const nextCalIdx = rList.length ? Math.max(...rList.map(item => item.cal_idx || 0)) + 1 : 1;
@@ -1957,7 +2442,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                     index: bestIdx,
                                     time_s: bestTime,
                                     raw: baseSig.cal[bestIdx],
-                                    amp: newAmp,
+                                    raw: rawPeak,
+                                    amp: isSarcomereMode ? normAmp : deltaR,
+                                    delta_r: deltaR,
+                                    base: bVal,
+                                    event_class: evClass,
                                     status: "ACCEPTED",
                                     origin: "manual",
                                     manually_rejected: false,
@@ -1972,7 +2461,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     return;
                 }
 
-                if (isUndet || isQCFailed || qc.isManualRejection) return;
+                if (P.raw && pt.data.yaxis === P.raw.ax) return;
+            if (isUndet || isQCFailed || qc.isManualRejection) return;
                 const polMapKey = currentSegIdx + "|" + polKey;
                 if (!manualPeaksByPol[polMapKey]) manualPeaksByPol[polMapKey] = {};
                 if (!perPeakStrictness[polMapKey]) perPeakStrictness[polMapKey] = {};
@@ -2051,7 +2541,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         toggleEventState(a);
                         selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: a.index };
                     }
-                } else if ((name === "amplitude" || name === "\u0394R/R\u2080 amplitude" || name === "Raw RatioMetricCalcium" || name === "raw PixelCorrelation" || name.endsWith("amplitude")) && ampArr) {
+                } else if ((name === "amplitude" || name === "Shortening (%)" || name === "Shortening %" || name.includes("Shortening") || name === "\u0394R/R\u2080 amplitude" || name.endsWith("amplitude")) && ampArr) {
                     let c = Math.round((pt.x - seg.t0) * seg.fs);
                     let lo = Math.max(0, c - w), hi = Math.min(seg.length - 1, c + w), best = -1, bv = -Infinity;
                     for (let i = lo; i <= hi; i++) if (Number.isFinite(ampArr[i]) && ampArr[i] > bv) { bv = ampArr[i]; best = i; }
@@ -2067,19 +2557,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         }
                     } else {
                         // Unmarked trace location: add BLUE manually added peak
+                        const selectedClass = isSarcomereMode ? (document.getElementById("peak_class_select") ? document.getElementById("peak_class_select").value : "MAIN") : "MAIN";
                         let targetEv = existing;
                         if (!targetEv) {
                             targetEv = {
                                 index: best, time_s: seg.t0 + best / seg.fs, amp: ampArr[best], raw: baseSig.raw[best],
+                                event_class: selectedClass,
                                 status: "ACCEPTED", original_status: "MISSING", original_reason: "",
-                                reason: "", origin: "manual", manually_rejected: false, per_peak_strictness: "inherit"
+                                reason: "manual_override", origin: "manual", manually_rejected: false, per_peak_strictness: "inherit"
                             };
                             anns.push(targetEv);
                         } else {
                             targetEv.status = "ACCEPTED";
                             targetEv.origin = "manual";
+                            targetEv.event_class = selectedClass;
                             targetEv.manually_rejected = false;
-                            targetEv.reason = "";
+                            targetEv.reason = "manual_override";
                         }
                         manMap[targetEv.index] = { index: targetEv.index, time_s: targetEv.time_s, amp: targetEv.amp, raw: targetEv.raw, action: "ADDED" };
                         selectedPeakInfo = { segIdx: currentSegIdx, polKey: polKey, index: targetEv.index };
@@ -2427,8 +2920,10 @@ def main(argv=None):
                         help="Path to save active polarity overrides to JSON")
     parser.add_argument("--inspect-polarity", action="store_true", default=False,
                         help="Run Stage 1 polarity inspection and print summary table, then exit")
-    parser.add_argument("--analysis-mode", choices=["pixel", "calcium", "pixel-calcium"], default="pixel",
-                        help="Analysis mode: 'pixel' (default), 'calcium' (independent calcium transient analysis), or 'pixel-calcium' (synchronized dual-channel review)")
+    parser.add_argument("--analysis-mode", choices=["pixel", "calcium", "pixel-calcium", "sarcomere", "sarcomere-calcium"], default="pixel",
+                        help="Analysis mode: 'pixel' (default), 'calcium', 'pixel-calcium', 'sarcomere' (Sarcomere Shortening only), or 'sarcomere-calcium' (Sarcomere + Calcium assisted)")
+    parser.add_argument("--calcium-assistance", choices=["on", "off"], default="on",
+                        help="In 'sarcomere-calcium' mode, enable or disable calcium assistance for sarcomere detection (default: 'on')")
     args = parser.parse_args(argv)
 
     try:
@@ -2447,6 +2942,37 @@ def main(argv=None):
         if args.save_overrides:
             saved_p = save_polarity_overrides(args.input_file, overrides, args.save_overrides, segment_rejections=segment_rejections)
             print(f"Saved polarity overrides and rejections to {saved_p}")
+
+        if args.analysis_mode in ("sarcomere", "sarcomere-calcium"):
+            from pixel_counter.sarcomere_review import (
+                generate_sarcomere_html,
+                process_sarcomere_workbook,
+            )
+            segments_data, source_name = process_sarcomere_workbook(
+                args.input_file,
+                segments=args.segments,
+                analysis_mode=args.analysis_mode,
+                enable_assistance=(args.calcium_assistance == "on"),
+            )
+            generate_sarcomere_html(
+                segments_data,
+                source_name,
+                args.output,
+                default_run="default",
+                workbook_path=args.input_file,
+                analysis_mode=args.analysis_mode,
+                segment_rejections=segment_rejections,
+            )
+            print("\nINSTRUCTIONS:")
+            print(f"1. Open '{args.output}' in your web browser.")
+            print("2. Review segments with the dropdown or Previous/Next buttons (or Left/Right arrow keys).")
+            print("3. Click a marker to flip ACCEPTED <-> REJECTED (GREEN <-> RED CROSS).")
+            print("4. Click the raw or shortening curve to add a missed contraction (snaps to authentic local nadir).")
+            print("5. Click an added BLUE contraction to delete it completely.")
+            print("6. Select any contraction to inspect detailed metrics, alter its classification (MAIN/SECONDARY/AMBIGUOUS), or set per-event strictness.")
+            print("7. In 'sarcomere-calcium' mode, inspect matched calcium transients and electromechanical delay (tau_EMD).")
+            print("8. Click 'Save annotations (CSV)' or 'Export overrides (JSON)' to persist your review decisions.")
+            return
 
         params_by_name = build_params_by_name(args)
         config = replace(
