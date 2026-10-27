@@ -209,7 +209,7 @@ def analyze_sarcomere_pipeline(
 
     # Conservative second-pass artifact reconstruction on internal detection array
     # sig_raw (x) remains 100% untouched; reconstruction occurs on temporary sig_recon
-    sig_recon, recon_meta = reconstruct_narrow_tracking_artifacts(x, fs, artifact_info)
+    sig_recon, recon_meta = reconstruct_narrow_tracking_artifacts(x, fs, artifact_info, t0=t0)
     artifact_info["reconstructed_intervals"] = recon_meta.get("reconstructed_intervals", [])
     artifact_info["n_reconstructed_intervals"] = len(artifact_info["reconstructed_intervals"])
 
@@ -219,8 +219,8 @@ def analyze_sarcomere_pipeline(
         if cal_sig_raw is not None and len(cal_sig_raw) > 0 and cal_fs is not None and cal_fs > 0:
             c_t0 = float(cal_t0 if cal_t0 is not None else 0.0)
             if cal_params is None:
-                from pixel_counter.calcium_detector import CalciumDetectorParams
-                cal_params = CalciumDetectorParams(is_adult_cardiomyocyte=True)
+                from pixel_counter.calcium_detector import ADULT_CALCIUM_STRICTNESS_PRESETS
+                cal_params = ADULT_CALCIUM_STRICTNESS_PRESETS["default"]
             cal_pipeline_res = analyze_calcium_pipeline(
                 cal_sig_raw, cal_fs, t0=c_t0, params=cal_params
             )
@@ -230,8 +230,12 @@ def analyze_sarcomere_pipeline(
     primary_l0: Optional[np.ndarray] = None
     primary_match_res: Optional[Dict[str, Any]] = None
 
-    for preset_name in ["default", "permissive", "strict"]:
-        p = SARCOMERE_STRICTNESS_PRESETS[preset_name]
+    preset_list = ["default", "permissive", "strict"]
+    if params is not None and params.preset_name not in preset_list:
+        preset_list.append(params.preset_name)
+
+    for preset_name in preset_list:
+        p = params if (params is not None and preset_name == params.preset_name) else SARCOMERE_STRICTNESS_PRESETS[preset_name]
         ev_df_recon, l0_curve, _ = detect_sarcomere_contractions(
             sig_recon, fs, t0=t0, params=p, artifact_info=artifact_info
         )
@@ -486,10 +490,10 @@ def analyze_sarcomere_pipeline(
             "noise_sigma": float(artifact_info.get("sigma_hf", 0.01)),
             "params": p,
             "matching": match_info,
-            "n_directly_measured": match_info.get("n_directly_measured", reportable_acc),
-            "n_calcium_assisted": match_info.get("n_calcium_assisted", 0),
-            "n_valid_amplitude": match_info.get("n_valid_amplitude", reportable_acc),
-            "n_lacking_amplitude": match_info.get("n_lacking_amplitude", 0),
+            "n_directly_measured": int(np.sum((ev_df["status"] == "ACCEPTED") & (~ev_df["peak_corrupted"].astype(bool)))) if (qc_st == "PASS" and not ev_df.empty) else 0,
+            "n_calcium_assisted": 0,
+            "n_valid_amplitude": int(np.sum((ev_df["status"] == "ACCEPTED") & ev_df["pct_shortening"].notna())) if (qc_st == "PASS" and not ev_df.empty) else 0,
+            "n_lacking_amplitude": int(np.sum((ev_df["status"] == "ACCEPTED") & ev_df["pct_shortening"].isna())) if (qc_st == "PASS" and not ev_df.empty) else 0,
             "n_unresolved": match_info.get("n_unresolved", 0),
             "sarc_only_events": match_info.get("sarc_only_events"),
         }

@@ -470,8 +470,7 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
     out["env_cue"] = ecue
 
     tc = _estimate_pacing_cycle(finite, fs)
-    is_high_freq = (tc <= 0.40)  # pacing >= 2.5 Hz (e.g. 3 Hz)
-    freq = 1.0 / tc if tc > 0 else 0.0
+    is_rapid_cycle = (tc <= 0.42)  # Short cycle period where diastasis plateau is compressed
 
     # Calculate 95th percentile derivative velocity ratio
     dx = np.diff(finite) * fs
@@ -482,34 +481,40 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
     vel_log_ratio = float(np.log(v_up / max(v_dn, 1e-12)))
     out["vel_cue"] = vel_log_ratio
 
-    # Standard directional votes
-    dwell_thresh = 0.75 if is_high_freq else DWELL_DECISIVE
+    # Continuous duty-cycle scaling of dwell threshold as cycle period shortens
+    cycle_comp = float(np.clip((0.55 - tc) / 0.25, 0.0, 1.0)) if np.isfinite(tc) and tc > 0 else 0.0
+    dwell_thresh = float(DWELL_DECISIVE + 0.40 * cycle_comp)
     v_dwell = (-1 if d > 0 else 1) if (np.isfinite(d) and abs(d) >= dwell_thresh) else 0
 
-    min_onset = 0.55 if is_high_freq else ASYM_MIN_LOG_RATIO
+    min_onset = float(ASYM_MIN_LOG_RATIO + 0.20 * cycle_comp)
     v_onset = (1 if sc > 0 else -1) if (np.isfinite(sc) and np.isfinite(ec) and np.sign(sc) == np.sign(ec)
                                         and min(abs(sc), abs(ec)) >= min_onset) else 0
     v_curv = (-1 if cc > 0 else 1) if (np.isfinite(cc) and abs(cc) >= CURV_DECISIVE) else 0
     v_env = (1 if ecue > 0 else -1) if (np.isfinite(ecue) and abs(ecue) >= ENV_DECISIVE) else 0
 
-    # Physiological Refinement Rule 1: Dwell + Curvature consensus at low/mid frequency (< 2.5 Hz)
-    # Cell spends >= 70% of time at top baseline (d >= 0.40) and troughs are much sharper than peaks (cc >= 0.80).
-    # Overrules apparent onset recoil velocity bounce.
-    if not is_high_freq and np.isfinite(d) and d >= 0.40 and np.isfinite(cc) and cc >= 0.80:
-        out.update(polarity=-1, status="OK", method="dwell_and_curvature_consensus",
-                   reason=f"dwell_{d:+.2f}_and_curv_{cc:+.2f}_consensus")
-        return out
+    # Morphological Consensus 1: Resting dwell + extremum curvature consensus
+    # When the signal dwells predominantly on one rail (|d| >= 0.40) and the opposite extrema are
+    # markedly sharper (|cc| >= 0.80 in the same polarity direction), both cues agree on polarity.
+    if not is_rapid_cycle and np.isfinite(d) and abs(d) >= 0.40 and np.isfinite(cc) and abs(cc) >= 0.80:
+        if (-1 if d > 0 else 1) == (-1 if cc > 0 else 1):
+            pol_dc = -1 if d > 0 else 1
+            opposing_strong_onset = (v_onset != 0 and v_onset != pol_dc and min(abs(sc), abs(ec)) >= 0.80)
+            if not opposing_strong_onset or abs(d) >= 0.85 or abs(cc) >= 1.50:
+                out.update(polarity=pol_dc, status="OK", method="dwell_and_curvature_consensus",
+                           reason=f"dwell_{d:+.2f}_and_curv_{cc:+.2f}_consensus")
+                return out
 
-    # Physiological Refinement Rule 2: Overwhelming onset kinetics at 2 Hz without strong opposing curvature
-    # In prolonged contracture, median dwell is depressed, but active contraction downstroke velocity
-    # is overwhelmingly faster (|sc| >= 0.85) than relaxation, and curvature does not contradict.
-    # Exclude cases with extreme dwell (|d| >= 0.85) which represent contradictory resting state evidence (e.g. Seg 25).
-    if 1.5 <= freq <= 2.4 and v_onset != 0 and abs(d) < 0.85:
+    # Morphological Consensus 2: Overwhelming onset kinetics without opposing curvature or extreme dwell
+    # When active contraction upstroke/downstroke kinetics are overwhelmingly asymmetric
+    # (min(|sc|, |ec|) >= 0.40 and max(|sc|, |ec|) >= 0.85) and curvature does not contradict,
+    # resolve polarity unless resting dwell is at an extreme opposing rail (|d| >= 0.85).
+    if v_onset != 0 and (not np.isfinite(d) or abs(d) < 0.85):
         if min(abs(sc), abs(ec)) >= 0.40 and max(abs(sc), abs(ec)) >= 0.85:
             if not (v_curv != 0 and v_curv != v_onset):
-                out.update(polarity=v_onset, status="OK", method="overwhelming_onset_kinetics",
-                           reason=f"overwhelming_onset_sc_{sc:+.2f}_ec_{ec:+.2f}")
-                return out
+                if v_dwell == 0 or v_dwell == v_onset or (np.isfinite(tc) and tc <= 0.65):
+                    out.update(polarity=v_onset, status="OK", method="overwhelming_onset_kinetics",
+                               reason=f"overwhelming_onset_sc_{sc:+.2f}_ec_{ec:+.2f}")
+                    return out
 
     # Case 1: Dwell is decisive
     if v_dwell != 0:
@@ -526,8 +531,8 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
             out["reason"] = f"conflict_dwell_{v_dwell:+d}_vs_onset_{v_onset:+d}"
             return out
 
-        # Check if Curvature strongly contradicts Dwell (low/mid frequency only)
-        if v_curv != 0 and v_curv != v_dwell and not is_high_freq:
+        # Check if Curvature strongly contradicts Dwell
+        if v_curv != 0 and v_curv != v_dwell and not is_rapid_cycle:
             mild_onset_agrees = (np.isfinite(sc) and np.sign(sc) == v_dwell and abs(sc) >= 0.20) or \
                                 (np.isfinite(ec) and np.sign(ec) == v_dwell and abs(ec) >= 0.20)
             if mild_onset_agrees:
@@ -544,10 +549,8 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
         out.update(polarity=v_dwell, status="OK", method="resting_dwell", reason=f"dwell_asymmetry_{d:+.2f}")
         return out
 
-    # Physiological Refinement Rule 3: Mild Dwell + Onset consensus at low/mid frequency (< 2.5 Hz)
-    # Mild resting dwell (|d| >= 0.08) and onset kinetics both point in the same direction,
-    # with no opposing extremum curvature.
-    if not is_high_freq and np.isfinite(d) and abs(d) >= 0.08:
+    # Morphological Consensus 3: Mild Dwell + Onset agreement without opposing curvature
+    if not is_rapid_cycle and np.isfinite(d) and abs(d) >= 0.08:
         mild_v_dwell = -1 if d > 0 else 1
         if np.isfinite(sc) and np.sign(sc) == mild_v_dwell and abs(sc) >= 0.20 and \
            np.isfinite(ec) and np.sign(ec) == mild_v_dwell and abs(ec) >= 0.35:
@@ -556,15 +559,15 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
                            reason=f"mild_dwell_{d:+.2f}_onset_agree_{sc:+.2f}")
                 return out
 
-    # Physiological Refinement Rule 4: High-frequency kinetic & cycle morphology consensus at 3 Hz
-    if is_high_freq:
+    # Morphological Consensus 4: Rapid-cycle (short diastasis) multi-cue kinetic & cycle morphology consensus
+    if is_rapid_cycle:
         cm = _cycle_morphology_cues(finite, fs, tc)
         cycle_dur = cm.get("cycle_dur_ratio", float("nan"))
         cycle_var = cm.get("cycle_var_ratio", float("nan"))
         out["cycle_dur_ratio"] = cycle_dur
         out["cycle_var_ratio"] = cycle_var
 
-        # Rule 4A: Fast onset slope and edge duration supported by derivative velocity asymmetry
+        # Antisymmetric rapid-cycle kinetic + velocity consensus
         if np.isfinite(sc) and np.isfinite(ec) and np.sign(sc) == np.sign(ec) and \
            abs(sc) >= 0.30 and abs(ec) >= 0.60:
             v_on_hf = 1 if sc > 0 else -1
@@ -573,44 +576,38 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
                            reason=f"hf_onset_sc_{sc:+.2f}_ec_{ec:+.2f}_vel_{vel_log_ratio:+.2f}")
                 return out
 
-        # Rule 4B: Multi-cue kinetic & curvature consensus (+1)
-        # Strong onset edge duration (ec >= 0.70), positive velocity asymmetry (vel >= 0.20),
-        # and sharper peak curvature than trough (cc <= -0.50).
-        if np.isfinite(ec) and ec >= 0.70 and vel_log_ratio >= 0.20 and np.isfinite(cc) and cc <= -0.50:
-            out.update(polarity=1, status="OK", method="hf_multicue_consensus",
-                       reason=f"hf_multicue_ec_{ec:+.2f}_vel_{vel_log_ratio:+.2f}_curv_{cc:+.2f}")
-            return out
+        # Antisymmetric rapid-cycle edge + velocity + curvature consensus
+        if np.isfinite(ec) and abs(ec) >= 0.70 and abs(vel_log_ratio) >= 0.20 and np.isfinite(cc) and abs(cc) >= 0.50:
+            v_ec = 1 if ec > 0 else -1
+            if np.sign(vel_log_ratio) == v_ec and (-1 if cc > 0 else 1) == v_ec:
+                out.update(polarity=v_ec, status="OK", method="hf_multicue_consensus",
+                           reason=f"hf_multicue_ec_{ec:+.2f}_vel_{vel_log_ratio:+.2f}_curv_{cc:+.2f}")
+                return out
 
-        # Rule 4C: Extrema variance asymmetry & upper resting dwell (-1)
-        # Troughs vary significantly more than peaks (cycle_var_ratio <= -1.50), resting dwell is at top (d >= 0.45),
-        # and troughs are sharper than top dome (cc >= 0.70).
-        if np.isfinite(cycle_var) and cycle_var <= -1.50 and np.isfinite(d) and d >= 0.45 and np.isfinite(cc) and cc >= 0.70:
-            out.update(polarity=-1, status="OK", method="hf_extrema_variance_asymmetry",
-                       reason=f"hf_var_{cycle_var:+.2f}_dwell_{d:+.2f}_curv_{cc:+.2f}")
-            return out
+        # Antisymmetric rapid-cycle cycle-duration + slope + velocity consensus
+        if np.isfinite(cycle_dur) and abs(cycle_dur) >= 0.50 and np.isfinite(sc) and abs(sc) >= 0.15 and abs(vel_log_ratio) >= 0.15:
+            v_cd = 1 if cycle_dur > 0 else -1
+            if np.sign(sc) == v_cd and np.sign(vel_log_ratio) == v_cd:
+                out.update(polarity=v_cd, status="OK", method="hf_cycle_duration_asymmetry",
+                           reason=f"hf_dur_{cycle_dur:+.2f}_sc_{sc:+.2f}_vel_{vel_log_ratio:+.2f}")
+                return out
 
-        # Rule 4D: Aligned cycle rise/fall duration asymmetry (+1)
-        # Cycle rise time is >= 1.6x faster than relaxation decay (cycle_dur_ratio >= 0.50),
-        # supported by positive onset slope (sc >= 0.15) and positive velocity ratio (vel >= 0.15).
-        if np.isfinite(cycle_dur) and cycle_dur >= 0.50 and np.isfinite(sc) and sc >= 0.15 and vel_log_ratio >= 0.15:
-            out.update(polarity=1, status="OK", method="hf_cycle_duration_asymmetry",
-                       reason=f"hf_dur_{cycle_dur:+.2f}_sc_{sc:+.2f}_vel_{vel_log_ratio:+.2f}")
-            return out
+        # Antisymmetric rapid-cycle dwell + cycle-variance consensus
+        if np.isfinite(d) and abs(d) >= 0.45 and np.isfinite(cycle_var) and abs(cycle_var) >= 0.80:
+            v_dw = -1 if d > 0 else 1
+            v_vr = 1 if cycle_var > 0 else -1
+            if v_dw == v_vr and (abs(d) >= 0.60 or (np.isfinite(cc) and (-1 if cc > 0 else 1) == v_dw and abs(cc) >= 0.70)):
+                out.update(polarity=v_dw, status="OK", method="hf_dwell_and_variance_consensus",
+                           reason=f"hf_dwell_{d:+.2f}_var_{cycle_var:+.2f}")
+                return out
 
-        # Rule 4E: Lower resting dwell with cycle variance corroboration (+1)
-        # Cell spends >80% time near bottom rail (d <= -0.60), and peaks vary significantly more than troughs (cycle_var >= 0.80).
-        if np.isfinite(d) and d <= -0.60 and np.isfinite(cycle_var) and cycle_var >= 0.80:
-            out.update(polarity=1, status="OK", method="hf_dwell_and_variance_consensus",
-                       reason=f"hf_dwell_{d:+.2f}_var_{cycle_var:+.2f}")
-            return out
-
-    # If high frequency and moderate dwell (0.35 <= |d| < 0.75), accept if corroborated by onset
-    if is_high_freq and abs(d) >= DWELL_DECISIVE:
-        mild_v_dwell = -1 if d > 0 else 1
-        if np.isfinite(sc) and np.sign(sc) == mild_v_dwell and abs(sc) >= 0.20:
-            out.update(polarity=mild_v_dwell, status="OK", method="resting_dwell",
-                       reason=f"high_freq_dwell_{d:+.2f}_supported_by_onset_{sc:+.2f}")
-            return out
+        # Moderate dwell corroborated by onset slope
+        if abs(d) >= DWELL_DECISIVE:
+            mild_v_dwell = -1 if d > 0 else 1
+            if np.isfinite(sc) and np.sign(sc) == mild_v_dwell and abs(sc) >= 0.20:
+                out.update(polarity=mild_v_dwell, status="OK", method="resting_dwell",
+                           reason=f"high_freq_dwell_{d:+.2f}_supported_by_onset_{sc:+.2f}")
+                return out
 
     # Case 2: Onset is decisive
     if v_onset != 0:
@@ -618,20 +615,20 @@ def _morphology_polarity(sig_raw: np.ndarray, fs: float) -> Dict:
                    reason=f"onset_agree_sc_{sc:+.2f}_ec_{ec:+.2f}")
         return out
 
-    # Case 3: Curvature is decisive (low/mid frequency only)
-    if v_curv != 0 and not is_high_freq:
+    # Case 3: Curvature is decisive
+    if v_curv != 0 and not is_rapid_cycle:
         if np.isfinite(d) and abs(d) < 0.05:
             out["reason"] = f"symmetric_dwell_unsupported_curv_{cc:+.2f}"
             return out
         if np.isfinite(d) and np.sign(-d) != v_curv and abs(d) >= 0.20:
-            out["reason"] = f"curv_dwell_mild_conflict"
+            out["reason"] = "curv_dwell_mild_conflict"
             return out
         out.update(polarity=v_curv, status="OK", method="extremum_curvature",
                    reason=f"curvature_sharpness_{cc:+.2f}")
         return out
 
-    # Case 4: Envelope is decisive ONLY if dwell does not contradict, onset does not oppose, AND not high frequency
-    if v_env != 0 and not is_high_freq:
+    # Case 4: Envelope is decisive ONLY if dwell and onset do not contradict
+    if v_env != 0 and not is_rapid_cycle:
         if np.isfinite(d) and abs(d) >= 0.10 and np.sign(d) == v_env:
             out["reason"] = f"env_contradicts_mild_dwell_{d:+.2f}"
             return out

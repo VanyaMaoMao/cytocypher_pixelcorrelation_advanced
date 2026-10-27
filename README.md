@@ -1,18 +1,28 @@
-# Cytocypher PixelCorrelation Advanced
+# Cytocypher PixelCorrelation, Calcium & Sarcomere Shortening Analyzer
 
-Advanced scientific Python pipeline for automated cardiomyocyte contraction detection, physiological polarity determination, and contractility analysis on IonOptix CytoCypher segment workbooks.
+Integrated scientific Python suite for automated cardiomyocyte contractility, sarcomere shortening, and intracellular $\text{Ca}^{2+}$ transient analysis on IonOptix CytoCypher segment workbooks.
 
 ---
 
-## 1. What This Software Does
+## 1. Scientific Capabilities & Architecture
 
-The pipeline independently analyzes mechanical cardiomyocyte motion waveforms exported from IonOptix CytoCypher workbooks (`PixelCorrelation Segment N`), transforming raw displacement traces into physiological, baseline-relative contraction amplitude signals:
+The application provides three independent, signal-processing-driven analysis pipelines unified under a single interactive HTML review and reporting framework (`run_v2_review_utility.py`):
 
-- **Physiological Polarity Resolution**: Contraction excursions in raw PixelCorrelation may point downward or upward depending on tracking orientation. The software automatically identifies physiological contraction direction and inverts downward traces into positive-going contraction amplitude $A(t) = \text{polarity} \times (S_{\text{raw}} - B_{\text{raw}})$.
-- **Default Mode (PixelCorrelation-Only)**: Operates strictly on mechanical motion morphology alone by default. Does not require or depend on auxiliary channels (`RatioMetricCalcium` or `PixelIntensity`).
-- **Optional Calcium-Assisted Mode**: When synchronized `RatioMetricCalcium` is available and enabled via `--use-calcium-polarity`, evaluates excitation-contraction coupling (ECC) timing (systolic latency ~35–150 ms) to resolve ambiguous waveforms.
-- **Robust Event Detection (`v2_detector`)**: Identifies genuine major contractions with strictness presets (`default`, `strict`, `lenient`), rejecting secondary fluctuations, double-peaking, and baseline noise.
-- **Interactive Review Utility (`run_v2_review_utility.py`)**: Standalone, interactive HTML report with embedded Plotly visualizations, live polarity flipping, manual overrides, and CSV annotation export.
+1. **PixelCorrelation Contraction Analyzer (`pixel_counter/v2_signal.py`, `pixel_counter/v2_detector.py`, `pixel_counter/qc_v2.py`)**:
+   - Automatically determines physiological contraction polarity ($+1$ upward vs. $-1$ downward) using antisymmetric multi-cue morphology (resting dwell plateau, upstroke/relaxation velocity asymmetry, extremum curvature, and envelope stability) with continuous cycle-compression scaling.
+   - Safely abstains with `UNDETERMINED` (`polarity = 0`) when cues conflict, rather than guessing an inverted orientation.
+   - Supports optional excitation–contraction coupling (`--use-calcium-polarity`) latency verification when paired `RatioMetricCalcium` sheets are available.
+   - Evaluates 8 deterministic binary segment QC criteria (`PASS` / `REJECT`), including clean quiescent recording recognition (`PASS` with `0` events).
+
+2. **Calcium Transient Analyzer (`pixel_counter/calcium_detector.py`, `pixel_counter/calcium_review.py`)**:
+   - Processes ratiometric Fura-2 (`RatioMetricCalcium Segment N`) waveforms with automatic sensor-dropout masking, rolling lower-percentile diastolic baseline $F_0(t)$ estimation, and prominence-protected fractional normalization $\Delta R / \max(R_0, \epsilon)$.
+   - Supports **Standard Mode** (single-threshold peak detection) and **Adult Cardiomyocyte Mode** (`MAIN` vs. `SECONDARY` / `SCE` dual-threshold hierarchy $T_{\text{MAIN,Ca}} \ge T_{\text{SCE,Ca}}$).
+
+3. **Sarcomere Shortening Analyzer (`pixel_counter/sarcomere_detector.py`, `pixel_counter/sarcomere_qc.py`, `pixel_counter/sarcomere_artifact_recovery.py`, `pixel_counter/sarcomere_pipeline.py`)**:
+   - Detects downward sarcomere shortening troughs ($L_0(t) \to L_{\min}$) using a two-pass rolling diastolic percentile baseline $L_0(t)$ and enforces a strict dual-threshold amplitude hierarchy ($T_{\text{MAIN}} \ge T_{\text{SCE}}$) classifying contractions into `MAIN` and `SECONDARY` (`SCE`).
+   - Encapsulates hardware optical FFT bounds and physical velocity limits inside `SarcomereMeasurementProfile` (`fft_rail_min_um=1.28`, `fft_rail_max_um=2.18`, `jump_vel_um_per_s=8.75`, `extreme_vel_um_per_s=13.75`), scaled by sampling interval $\Delta t = 1/f_s$.
+   - Performs conservative local Hermite (`PchipInterpolator`) narrow-gap reconstruction ($\le 80\text{ ms}$) for timing recovery while strictly refusing to fabricate peak amplitudes when a trough nadir is corrupted (`NaN` amplitude, `TIMING_ONLY_UNMEASURED_PEAK`).
+   - Enforces **strict channel independence**: in `sarcomere-calcium` mode, the calcium trace never alters sarcomere detection, classification, amplitudes, or sarcomere QC.
 
 ---
 
@@ -22,7 +32,7 @@ The pipeline independently analyzes mechanical cardiomyocyte motion waveforms ex
 - Dependencies: `numpy`, `scipy`, `pandas`, `openpyxl`, `plotly`, `pytest`
 
 ```powershell
-cd "C:\path\to\cytocypher_pixelcorrelation_advanced"
+cd "C:\Users\talif\PyCharmProjects\cytocypher_v2_wt"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -31,104 +41,65 @@ pip install -r requirements.txt
 
 ---
 
-## 3. Cytocypher v2 Review Utility
+## 3. Command-Line Usage (`run_v2_review_utility.py`)
 
-The primary tool for verifying and analyzing recordings is `run_v2_review_utility.py`.
-
-### Default Mode: PixelCorrelation-Only
-
-By default, the utility processes the workbook using **PixelCorrelation morphology alone**:
-
+### 3.1 PixelCorrelation Analysis (Default Mode)
 ```powershell
+# PixelCorrelation-only mode (default):
 python run_v2_review_utility.py "path\to\workbook.xlsx" --output review_pixel_only.html
-```
 
-- High-frequency pacing ($\ge 2.5\text{ Hz}$, $T_{\text{cycle}} \le 0.40\text{ s}$) automatically engages kinetic gating to avoid false reversals caused by prolonged systolic plateaus.
-- Segments with conflicting or ambiguous cues safely abstain with status `UNDETERMINED` (`polarity = 0`) instead of making incorrect guesses.
-
-### Optional Mode: Calcium-Assisted Polarity
-
-When synchronized `RatioMetricCalcium` sheets are present and calcium-assisted polarity resolution is desired:
-
-```powershell
+# Optional Calcium-assisted polarity mode:
 python run_v2_review_utility.py "path\to\workbook.xlsx" --use-calcium-polarity --output review_calcium_assisted.html
-```
 
-In this mode:
-- The utility loads companion `RatioMetricCalcium Segment N` sheets and evaluates systolic latency and timing consistency across beats.
-- Unambiguously resolves high-frequency, symmetric, and challenged waveforms.
-- If calcium is flat, absent, or noisy for a particular segment, it falls back seamlessly to PixelCorrelation morphology.
-
-### Stage 1 Polarity Inspection Only
-
-To inspect the polarity classification table in the console without generating full HTML plots:
-
-```powershell
+# Console polarity inspection table only:
 python run_v2_review_utility.py "path\to\workbook.xlsx" --inspect-polarity
 ```
 
----
-
-## 4. PyCharm Run Configuration Setup
-
-To configure PyCharm for one-click analysis and review:
-
-1. **Open Run/Debug Configurations**:
-   - Go to menu `Run` -> `Edit Configurations...` (or click the configuration dropdown next to the green Play button).
-2. **Add New Python Configuration**:
-   - Click `+` -> `Python`.
-   - **Name**: `Cytocypher v2 Review (Pixel-Only Default)`
-   - **Script path**: Select `run_v2_review_utility.py`
-   - **Parameters**:
-     ```text
-     "25092026_IMR90_1,2,3HZ individual transients result.xlsx" --output v2_review_pixel_only.html
-     ```
-   - **Python interpreter**: Select the project virtualenv (`.venv`).
-   - **Working directory**: Project root directory.
-3. **Add Calcium-Assisted Configuration (Optional)**:
-   - Duplicate the configuration or add a new one named `Cytocypher v2 Review (Calcium-Assisted)`.
-   - **Parameters**:
-     ```text
-     "25092026_IMR90_1,2,3HZ individual transients result.xlsx" --use-calcium-polarity --output v2_review_calcium_assisted.html
-     ```
-4. Click **Apply** and **OK**. Click the green **Run** button to generate review files directly from PyCharm.
-
----
-
-## 5. Manual Polarity Overrides
-
-For challenging segments where automated morphology abstains or when visual verification requires an override:
-
-### Via Command-Line
+### 3.2 Sarcomere Shortening & Paired Sarcomere–Calcium Analysis
 ```powershell
-# Override individual segments (e.g., Segments 17 and 18 to -1, Segment 45 to +1):
-python run_v2_review_utility.py "workbook.xlsx" --override-polarity "17=-1,18=-1,45=1"
+# Sarcomere-only analysis and interactive HTML review:
+python run_v2_review_utility.py "path\to\sarcomere_workbook.xlsx" --mode sarcomere --output review_sarcomere.html
 
-# Save active overrides to a reusable JSON file:
+# Paired Sarcomere + Adult Calcium independent dual-channel analysis:
+python run_v2_review_utility.py "path\to\sarcomere_workbook.xlsx" --mode sarcomere-calcium --output review_sarcomere_calcium.html
+```
+
+### 3.3 Calcium Transient Analysis
+```powershell
+# Standalone Calcium transient analysis:
+python run_v2_review_utility.py "path\to\workbook.xlsx" --mode calcium --output review_calcium.html
+```
+
+### 3.4 Manual Polarity & QC Sidecar Overrides
+```powershell
+# Override individual segments from CLI and save sidecar JSON:
 python run_v2_review_utility.py "workbook.xlsx" --override-polarity "17=-1,18=-1,45=1" --save-overrides my_overrides.json
 
-# Load overrides from a JSON file:
+# Load saved overrides JSON:
 python run_v2_review_utility.py "workbook.xlsx" --overrides my_overrides.json
 ```
 
-### Via Interactive Review UI
-1. Open the generated HTML file in any browser (Chrome, Edge, Firefox).
-2. Use the **Polarity** dropdown to flip the orientation between `Auto`, `+1 (Upward Contraction)`, and `-1 (Downward Contraction)`. The waveform, baseline, and detected peaks update immediately.
-3. Click **Export polarity overrides (JSON)** to download a JSON file containing all manual overrides.
+---
+
+## 4. Scientific Integrity Audit & Documentation
+
+Complete mathematical specifications, forensic audit inventories, refactor changelogs, and development regression reports are maintained in `docs/scientific_integrity_audit/`:
+
+- [`docs/scientific_integrity_audit/rule_inventory.csv`](docs/scientific_integrity_audit/rule_inventory.csv): Complete 32-rule catalog across all production modules with physical units, physiological justifications, and audit classifications.
+- [`docs/scientific_integrity_audit/overfitting_audit.md`](docs/scientific_integrity_audit/overfitting_audit.md): Forensic audit of dataset-specific heuristics, magic numbers, and circular tests identified at baseline `ccdc1c8`.
+- [`docs/scientific_integrity_audit/scientific_methods.md`](docs/scientific_integrity_audit/scientific_methods.md): Mathematical and physiological specification of all algorithms, baselines, dual thresholds, and QC criteria.
+- [`docs/scientific_integrity_audit/refactor_changes.md`](docs/scientific_integrity_audit/refactor_changes.md): File-by-file and rule-by-rule engineering report of the anti-overfitting refactor.
+- [`docs/scientific_integrity_audit/validation_report.md`](docs/scientific_integrity_audit/validation_report.md): Development regression results, before/after comparisons, metamorphic test results, and runtime/memory profiling.
+- [`docs/scientific_integrity_audit/unresolved_issues.md`](docs/scientific_integrity_audit/unresolved_issues.md): Ranked risk register and external holdout validation requirements.
 
 ---
 
-## 6. Running Tests
-
-The test suite validates detector precision, polarity determination invariances, and auxiliary signal independence:
+## 5. Running the Test Suite
 
 ```powershell
 # Run full test suite:
-pytest -q tests/
+.\.venv\Scripts\python.exe -m pytest tests -q --basetemp=.pytest_temp
 
-# Run polarity and QC validation:
-pytest -q tests/test_v2_polarity_qc.py
-
-# Run review utility tests:
-pytest -q tests/test_v2_review_utility.py
+# Run the 15-category Scientific Integrity & Metamorphic Property Suite:
+.\.venv\Scripts\python.exe -m pytest tests/test_scientific_integrity_metamorphic.py -v --basetemp=.pytest_temp
 ```

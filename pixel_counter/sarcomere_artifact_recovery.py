@@ -41,6 +41,7 @@ def reconstruct_narrow_tracking_artifacts(
     fs: float,
     artifact_info: Dict[str, Any],
     max_gap_s: float = 0.040,
+    t0: float = 0.0,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Create a temporary detection-only reconstruction array bridging narrow tracking spikes.
 
@@ -95,8 +96,8 @@ def reconstruct_narrow_tracking_artifacts(
             unrecoverable_intervals.append({
                 "start_idx": c0,
                 "end_idx": c1,
-                    "start_time_s": float(c0 / fs),
-                    "end_time_s": float(c1 / fs),
+                    "start_time_s": float(t0 + c0 / fs),
+                    "end_time_s": float(t0 + c1 / fs),
                     "duration_ms": float(dur_s * 1000.0),
                 "duration_s": dur_s,
                 "reason": "duration_exceeds_max_gap",
@@ -111,8 +112,8 @@ def reconstruct_narrow_tracking_artifacts(
             unrecoverable_intervals.append({
                 "start_idx": c0,
                 "end_idx": c1,
-                    "start_time_s": float(c0 / fs),
-                    "end_time_s": float(c1 / fs),
+                    "start_time_s": float(t0 + c0 / fs),
+                    "end_time_s": float(t0 + c1 / fs),
                     "duration_ms": float(dur_s * 1000.0),
                 "duration_s": dur_s,
                 "reason": "insufficient_boundary_anchors",
@@ -138,8 +139,8 @@ def reconstruct_narrow_tracking_artifacts(
                 reconstructed_intervals.append({
                     "start_idx": c0,
                     "end_idx": c1,
-                    "start_time_s": float(c0 / fs),
-                    "end_time_s": float(c1 / fs),
+                    "start_time_s": float(t0 + c0 / fs),
+                    "end_time_s": float(t0 + c1 / fs),
                     "duration_ms": float(dur_s * 1000.0),
                     "duration_s": dur_s,
                     "samples_count": cluster_len,
@@ -153,8 +154,8 @@ def reconstruct_narrow_tracking_artifacts(
                 unrecoverable_intervals.append({
                     "start_idx": c0,
                     "end_idx": c1,
-                    "start_time_s": float(c0 / fs),
-                    "end_time_s": float(c1 / fs),
+                    "start_time_s": float(t0 + c0 / fs),
+                    "end_time_s": float(t0 + c1 / fs),
                     "duration_ms": float(dur_s * 1000.0),
                     "duration_s": dur_s,
                     "reason": "interpolated_values_exceeded_safety_bounds",
@@ -163,8 +164,8 @@ def reconstruct_narrow_tracking_artifacts(
             unrecoverable_intervals.append({
                 "start_idx": c0,
                 "end_idx": c1,
-                    "start_time_s": float(c0 / fs),
-                    "end_time_s": float(c1 / fs),
+                    "start_time_s": float(t0 + c0 / fs),
+                    "end_time_s": float(t0 + c1 / fs),
                     "duration_ms": float(dur_s * 1000.0),
                 "duration_s": dur_s,
                 "reason": f"interpolation_exception_{exc}",

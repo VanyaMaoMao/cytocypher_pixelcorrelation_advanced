@@ -102,25 +102,25 @@ def detect_incompatible_contraction_directions(
     ):
         return True
 
-    # 2. Interleaved opposite-direction contractions around an interior stationary baseline
+    # 2. Interleaved opposite-direction contractions at anti-phase around an interior stationary baseline
     bidir_g = min(up_exc_g, dn_exc_g) / max(up_exc_g, dn_exc_g, 1e-9)
+    w_ratio = min(med_wu, med_wd) / max(med_wu, med_wd, 1e-9)
     if (
         bidir_g >= 0.35
         and min(up_exc_g, dn_exc_g) >= 0.14
         and len(pu) >= 5
         and len(pd_i) >= 5
         and abs(len(pu) - len(pd_i)) <= 1
-        and 0.30 <= h_ratio <= 0.60
-        and 0.11 <= med_wu <= 0.20
-        and 0.11 <= med_wd <= 0.20
-        and ((med_hu >= med_hd and med_wd >= 1.04 * med_wu) or (med_hd > med_hu and med_wu >= 1.04 * med_wd))
+        and h_ratio >= 0.30
+        and w_ratio >= 0.60
+        and min(med_wu, med_wd) >= 0.08
     ):
         if len(pu) >= 3:
             ibi_u = float(np.median(np.diff(pu)))
             if ibi_u > 0:
                 phases = [float(np.min(np.abs(pd_i - u_idx))) / ibi_u for u_idx in pu]
                 med_phase = float(np.median(phases))
-                if 0.40 <= med_phase <= 0.60:
+                if 0.38 <= med_phase <= 0.62:
                     return True
 
     return False

@@ -654,6 +654,10 @@ def build_concatenated_signal(
             "stitch_row_duration_mismatch_rows": row_duration_mismatch_rows,
             "stitch_provenance_row": provenance_row,
             "stitch_provenance_col": provenance_col,
+            "declared_fs": df.attrs.get("declared_fs", float(fs)),
+            "implied_fs": df.attrs.get("implied_fs", None),
+            "fs_provenance": df.attrs.get("fs_provenance", "declared"),
+            "fs_reconciled": bool(df.attrs.get("fs_reconciled", False)),
         }
     )
     return stitched, seg_meta, meta

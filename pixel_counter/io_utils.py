@@ -51,7 +51,9 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
     parsed_y_cols.sort(key=lambda x: x[0])
     y_cols = [c for _, c in parsed_y_cols]
 
-    # 2. Parse and validate Sampling Frequency
+    # 2. Parse and validate Sampling Frequency with explicit provenance
+    declared_fs: Optional[float] = None
+    fs_provenance = "declared"
     if "Sampling Frequency" in df.columns:
         s = pd.to_numeric(df["Sampling Frequency"], errors="coerce").dropna()
         if not s.empty:
@@ -61,10 +63,15 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
             fs = float(unique_fs[0])
             if not np.isfinite(fs) or fs <= 0.0:
                 raise ValueError(f"Invalid Sampling Frequency: {fs}")
+            declared_fs = fs
         else:
-            fs = 250.0  # Documented metadata source fallback
+            fs = 250.0
+            fs_provenance = "fallback_default"
+            logger.warning("Sampling Frequency column is empty in sheet %r; falling back to %.1f Hz.", sheet_name, fs)
     else:
         fs = 250.0
+        fs_provenance = "fallback_default"
+        logger.warning("Sampling Frequency column is missing in sheet %r; falling back to %.1f Hz.", sheet_name, fs)
 
     # Cross-validate declared Sampling Frequency against row timestamps if present
     implied_fs_candidates = []
@@ -83,12 +90,14 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
                     if sample_span > 10:
                         implied_fs_candidates.append(sample_span / (e - b))
 
+    med_implied: Optional[float] = None
+    fs_reconciled = False
     if implied_fs_candidates:
         med_implied = float(np.median(implied_fs_candidates))
         consistent_rows = [f for f in implied_fs_candidates if abs(f - med_implied) / med_implied < 0.01]
         logger.info(
-            "Sampling frequency evaluation for sheet %r: declared_fs=%.2f Hz, inferred_fs=%.2f Hz (from %d valid rows, %d consistent within 1%%).",
-            sheet_name, fs, med_implied, len(implied_fs_candidates), len(consistent_rows)
+            "Sampling frequency evaluation for sheet %r: declared_fs=%s Hz, inferred_fs=%.2f Hz (from %d valid rows, %d consistent within 1%%).",
+            sheet_name, f"{declared_fs:.2f}" if declared_fs is not None else "None", med_implied, len(implied_fs_candidates), len(consistent_rows)
         )
         if len(consistent_rows) >= 2 and abs(fs - med_implied) > 1.0:
             corrected_fs = float(round(med_implied)) if abs(med_implied - round(med_implied)) < 0.05 else float(med_implied)
@@ -97,6 +106,14 @@ def load_cytocypher_excel(file_path: Union[str, pd.ExcelFile], sheet_name: Optio
                 fs, sheet_name, med_implied, len(consistent_rows), corrected_fs
             )
             fs = corrected_fs
+            fs_provenance = "reconciled_from_timestamps"
+            fs_reconciled = True
+
+    df.attrs["declared_fs"] = declared_fs
+    df.attrs["implied_fs"] = med_implied
+    df.attrs["effective_fs"] = float(fs)
+    df.attrs["fs_provenance"] = fs_provenance
+    df.attrs["fs_reconciled"] = bool(fs_reconciled)
 
 
     # 3. Parse Sample ID

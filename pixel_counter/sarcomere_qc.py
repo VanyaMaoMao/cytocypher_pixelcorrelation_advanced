@@ -32,6 +32,25 @@ import scipy.ndimage as ndi
 from scipy.signal import savgol_filter
 
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SarcomereMeasurementProfile:
+    """Configurable physical and instrument parameters for sarcomere length acquisition."""
+    fft_rail_min_um: float = 1.28
+    fft_rail_max_um: float = 2.18
+    spike_dev_vel_um_s: float = 7.0       # 0.028 um/sample at 250 Hz
+    spike_step_vel_um_s: float = 8.0      # 0.032 um/sample at 250 Hz
+    shelf_jump1_vel_um_s: float = 13.0    # 0.052 um/sample at 250 Hz
+    shelf_jump2_vel_um_s: float = 22.5    # 0.090 um/sample at 250 Hz
+    shelf_edge_vel_um_s: float = 11.0     # 0.044 um/sample at 250 Hz
+    max_shelf_duration_s: float = 0.35
+
+
+DEFAULT_SARCOMERE_PROFILE = SarcomereMeasurementProfile()
+
+
 def estimate_sarcomere_noise_sigma(
     sig_raw: np.ndarray,
     fs: float,
@@ -58,6 +77,7 @@ def detect_sarcomere_artifacts(
     sig_raw: np.ndarray,
     fs: float,
     t0: float = 0.0,
+    profile: Optional[SarcomereMeasurementProfile] = None,
 ) -> Dict[str, Any]:
     """Identify vertical-line tracking artifacts and FFT rail locks without altering raw data.
 
@@ -96,10 +116,13 @@ def detect_sarcomere_artifacts(
             "p99_abs_d1": 0.0,
         }
 
-    # 1. Hardware / FFT rail lock or non-finite samples
-    # IonOptix FFT ceiling is ~2.2335 um, floor is ~1.1168 um.
-    # Physiological resting L0 is <= 2.13 um; physiological contraction Lmin is >= 1.30 um.
-    rail_mask = (~np.isfinite(x)) | (x >= 2.18) | (x <= 1.28)
+    if profile is None:
+        profile = DEFAULT_SARCOMERE_PROFILE
+
+    dt = 1.0 / float(fs)
+
+    # 1. Hardware / FFT rail lock or non-finite samples (configurable via SarcomereMeasurementProfile)
+    rail_mask = (~np.isfinite(x)) | (x >= profile.fft_rail_max_um) | (x <= profile.fft_rail_min_um)
 
     # 2. Estimate high-frequency noise sigma excluding rail samples
     sigma_hf = estimate_sarcomere_noise_sigma(x, fs, exclude_mask=rail_mask)
@@ -117,26 +140,22 @@ def detect_sarcomere_artifacts(
     win_local = max(7, int(round(0.06 * fs)) | 1)
     med_local = ndi.median_filter(x_clean_init, size=win_local)
 
-    # 3. Sharp 1-3 sample spike reversals
-    # A genuine contraction trough has smooth entry and exit slopes; an isolated vertical
-    # spike has an abrupt jump and immediate reversal within 1-3 samples.
-    spike_dev_thr = max(0.028, 7.5 * sigma_hf)
-    spike_step_thr = max(0.032, 8.0 * sigma_hf)
+    # 3. Sharp spike reversals scaled by physical velocity (um/s * dt)
+    spike_dev_thr = max(profile.spike_dev_vel_um_s * dt, 7.5 * sigma_hf)
+    spike_step_thr = max(profile.spike_step_vel_um_s * dt, 8.0 * sigma_hf)
+    max_rev_samples = max(2, int(round(0.012 * fs)))
     spike_mask = np.zeros(n, dtype=bool)
     for i in range(1, n - 1):
         if abs(x[i] - med_local[i]) > spike_dev_thr:
-            # Check if step into i and step out of i..i+2 oppose each other sharply
             step_in = d1[i]
             if abs(step_in) > spike_step_thr:
-                for k in range(1, min(4, n - i)):
+                for k in range(1, min(max_rev_samples + 1, n - i)):
                     step_out = x[i + k] - x[i + k - 1]
                     if step_in * step_out < 0 and abs(step_out) > 0.65 * spike_step_thr:
                         spike_mask[i : i + k] = True
                         break
 
-    # 4. Vertical boxcar / shelf tracking dropouts (e.g. A Seg 1, A Seg 3, A Seg 16)
-    # Compute step differences on x with isolated 1-3 sample spikes/rails already neutralized
-    # so that the return edge of a 1-sample spike never triggers a false shelf across a valid trough.
+    # 4. Boxcar / shelf tracking dropouts scaled by physical velocity (um/s * dt)
     x_nospike = x.copy()
     already_bad = rail_mask | spike_mask
     if np.any(already_bad) and not np.all(already_bad):
@@ -148,18 +167,20 @@ def detect_sarcomere_artifacts(
     d2_ns = np.zeros(n, dtype=float)
     d2_ns[2:] = x_nospike[2:] - x_nospike[:-2]
 
-    jump_1_thr = max(0.052, 11.0 * sigma_hf)
-    jump_2_thr = max(0.090, 16.0 * sigma_hf)
+    jump_1_thr = max(profile.shelf_jump1_vel_um_s * dt, 11.0 * sigma_hf)
+    jump_2_thr = max(profile.shelf_jump2_vel_um_s * dt, 16.0 * sigma_hf)
+    edge_vel_thr = profile.shelf_edge_vel_um_s * dt
+    opp_edge_thr = 10.0 * dt
 
     is_wall_start = (np.abs(d1_ns) > jump_1_thr) | (
-        (np.abs(d2_ns) > jump_2_thr) & ((np.abs(d1_ns) > 0.044) | (np.abs(np.roll(d1_ns, 1)) > 0.044))
+        (np.abs(d2_ns) > jump_2_thr) & ((np.abs(d1_ns) > edge_vel_thr) | (np.abs(np.roll(d1_ns, 1)) > edge_vel_thr))
     )
     wall_indices = np.where(is_wall_start)[0]
     shelf_mask = np.zeros(n, dtype=bool)
-    max_shelf_samples = int(round(0.35 * fs))
+    max_shelf_samples = int(round(profile.max_shelf_duration_s * fs))
 
     for idx in wall_indices:
-        step_dir = np.sign(d1_ns[idx]) if abs(d1_ns[idx]) >= 0.044 else np.sign(d2_ns[idx])
+        step_dir = np.sign(d1_ns[idx]) if abs(d1_ns[idx]) >= edge_vel_thr else np.sign(d2_ns[idx])
         if step_dir == 0:
             continue
         start_i = max(0, idx - 1) if (abs(d1_ns[idx]) < jump_1_thr and abs(d2_ns[idx]) > jump_2_thr) else idx
@@ -171,7 +192,7 @@ def detect_sarcomere_artifacts(
                 (j >= 2)
                 and (d2_ns[j] * step_dir < 0)
                 and (abs(d2_ns[j]) > 0.65 * jump_2_thr)
-                and (abs(d1_ns[j]) > 0.040)
+                and (abs(d1_ns[j]) > opp_edge_thr)
             )
             if opp_1 or opp_2:
                 interior = x_nospike[start_i:j]
@@ -398,8 +419,6 @@ def evaluate_sarcomere_qc(
         return "REJECT", "insufficient_valid_measurements", meta
 
     # 2. Severe tracking failure / rail lock / dominating vertical lines
-    # - Prolonged rail lock at end or across recording (e.g. B Seg 7 with 24.8% rail, max_art_dur 2.35s;
-    #   B Seg 12 with 9.4% rail; B Seg 32 with 5.0% rail and 14 clusters; B Seg 42 with 10.4% rail)
     if (
         rail_frac > 0.035
         or art_frac > 0.14
@@ -415,21 +434,19 @@ def evaluate_sarcomere_qc(
         meta["rejection_category"] = "noise_dominated"
         return "REJECT", "noise_dominated", meta
 
-    # 4. Noise-dominated / no credible downward contraction evidence
-    # Check if no accepted uncorrupted contractions exist
+    # 4. Zero accepted contractions: distinguish clean quiescent recording from artifact/noise domination
     if n_accepted == 0:
-        if n_corrupted > 0:
+        if n_corrupted > 0 or art_frac > 0.02 or rail_frac > 0.005:
             meta["rejection_category"] = "tracking_artifact_dominated"
             return "REJECT", "tracking_artifact_dominated", meta
+        n_cands_zero = len(events_df) if (events_df is not None and not events_df.empty) else 0
+        if sigma_hf <= 0.0012 and dn_p98 <= 0.0040 and n_cands_zero == 0 and n_clusters == 0:
+            meta["quiescent"] = True
+            return "PASS", "clean_quiescent_no_contractions", meta
         meta["rejection_category"] = "noise_dominated"
         return "REJECT", "noise_dominated", meta
 
-    # Check if detected fluctuations are symmetric upward/downward random noise
-    # Genuine contractions (even single beats like A28, A29, A39, A41, B29, B39, B49 or
-    # small paced beats like A4, A8, A10) have either strong downward asymmetry (asym >= 2.0)
-    # or strong row-to-row waveform coherence (med_row_corr >= 0.78).
-    # Noise segments (like A11, A21, A23-26, A30, A32-34, A36-38, A42-58) have asym < 1.75
-    # and low row coherence.
+    # 5. Low-SNR / symmetric random-walk noise domination check
     if asym < 1.65 and med_row_corr < 0.75 and (dn_p98 < 0.045 or med_snr < 12.0 or asym < 1.35):
         meta["rejection_category"] = "noise_dominated"
         return "REJECT", "noise_dominated", meta
@@ -438,43 +455,30 @@ def evaluate_sarcomere_qc(
         meta["rejection_category"] = "noise_dominated"
         return "REJECT", "noise_dominated", meta
 
-    # If multiple events are detected in a low-amplitude trace, require that downward peaks
-    # are genuinely coherent or significantly stronger than upward noise fluctuations
     if n_accepted >= 3 and dn_p98 < 0.016 and asym < 1.80 and med_row_corr < 0.78:
         meta["rejection_category"] = "noise_dominated"
         return "REJECT", "noise_dominated", meta
 
-    # Incomplete event recovery in high noise (e.g. Seg 9 where severe noise causes more than
-    # half of candidate contractions to be submerged below prominence threshold, leaving an
-    # erratic, unreliable partial count)
     if events_df is not None and not events_df.empty:
-        n_cands = len(events_df)
         n_noise_rej = int(np.sum(events_df["reason"] == "low_prominence"))
         if n_accepted < 5 and sigma_hf > 0.0020 and n_noise_rej >= n_accepted:
             meta["rejection_category"] = "noise_dominated"
             return "REJECT", "noise_dominated", meta
 
-    # 5. Severe tracking corruption check on accepted events:
-    # Check excessive reconstruction dependence for low-beat segments:
-    # When a segment has <= 12 contractions and requires extensive reconstruction
-    # (>= 8 intervals, >= 75% of accepted contractions) along with rail pegged artifacts (>= 0.8% railing),
-    # the recording is tracking-artifact dominated and cannot be reliably interpreted.
+    # 6. Excessive reconstruction dependence (count-invariant across all recordings)
     n_rec_ivs = len(artifact_info.get("reconstructed_intervals", []))
-    if n_accepted <= 12 and n_accepted > 0:
-        if n_rec_ivs >= 8 and (n_rec_ivs / n_accepted >= 0.75) and rail_frac >= 0.008:
-            meta["rejection_category"] = "tracking_artifact_dominated"
-            return "REJECT", "excessive_reconstruction_dependence", meta
+    if n_accepted > 0 and n_rec_ivs >= 8 and (n_rec_ivs / n_accepted >= 0.75) and rail_frac >= 0.008:
+        meta["rejection_category"] = "tracking_artifact_dominated"
+        return "REJECT", "excessive_reconstruction_dependence", meta
 
-    # Recordings with brief, localized tracking spikes that are safely bridged or bounded
-    # can PASS if authentic mechanical signal coverage is high. Recordings with excessive
-    # tracking failure or uninterpretable corruption remain strictly REJECT.
+    # 7. Uncorrupted event coverage check
     if n_corrupted > 0:
         n_clean = n_accepted - n_corrupted
         is_excessive_corruption = (
             art_frac > 0.08
             or rail_frac > 0.025
-            or (n_corrupted / max(1, n_accepted) > 0.60 and n_clean < 3 and n_accepted < 8)
-            or (n_clean == 0 and n_accepted < 6)
+            or (n_corrupted / max(1, n_accepted) > 0.60)
+            or (n_clean == 0)
         )
         if is_excessive_corruption:
             meta["rejection_category"] = "tracking_artifact_dominated"

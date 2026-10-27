@@ -435,7 +435,7 @@ def detect_sarcomere_contractions(
         # or if core tracking loss is prolonged (> 14 samples). An isolated upward spike on the shoulder
         # does not corrupt the trough if raw_val is a physiological contraction minimum (<= 1.75 um).
         is_nadir_art = bool(art_mask[raw_idx] or raw_val <= 1.15 or raw_val >= 2.18)
-        if len(valid_rel) == 0 or n_art_core > 14 or is_nadir_art:
+        if len(valid_rel) == 0 or n_art_core > max(2, int(round(0.056 * fs))) or is_nadir_art:
             peak_corrupted = True
 
         l0_val = float(l0_curve[raw_idx])
@@ -471,23 +471,6 @@ def detect_sarcomere_contractions(
         abs_short = float(l0_val - l_min_val)
         pct_short = float(100.0 * abs_short / l0_val) if l0_val > 0 else np.nan
         snr_val = float(abs_short / max(sigma_hf, 1e-5))
-
-        # Validate candidate against physiological shortening, prominence, and width criteria
-        status = "ACCEPTED"
-        reason = "accepted_isolated_spike_masked" if artifact_nearby else "accepted"
-
-        if fwhm_s < params.min_fwhm_s:
-            status = "REJECTED"
-            reason = "narrow_spike_width"
-        elif prom_val < eff_prom_thr:
-            status = "REJECTED"
-            reason = "low_prominence"
-        elif abs_short < eff_abs_thr:
-            status = "REJECTED"
-            reason = "below_min_shortening_um"
-        elif np.isnan(pct_short) or pct_short < params.min_pct_shortening:
-            status = "REJECTED"
-            reason = "below_min_pct_shortening"
 
         used_raw_indices.append(raw_idx)
         records.append({
@@ -546,14 +529,22 @@ def detect_sarcomere_contractions(
     t_abs_main_um = float(getattr(params, "min_abs_shortening_main_um", 0.0100))
 
     if np.isfinite(a_ref_pct) and a_ref_pct > 0:
-        eff_main_floor_pct = min(t_abs_main_pct, alpha_ref * a_ref_pct)
-        eff_main_floor_um = min(t_abs_main_um, alpha_ref * a_ref_um)
+        if a_ref_pct >= alpha_ref * t_abs_main_pct:
+            eff_main_floor_pct = min(t_abs_main_pct, alpha_ref * a_ref_pct)
+            eff_main_floor_um = min(t_abs_main_um, alpha_ref * a_ref_um)
+        else:
+            eff_main_floor_pct = t_abs_main_pct
+            eff_main_floor_um = t_abs_main_um
         t_main_cand = max(alpha_ref * a_ref_pct, k_main * sigma_pct, 100.0 * eff_main_floor_um / max(l0_med, 0.5), eff_main_floor_pct)
         eff_abs_main_um = max(alpha_ref * a_ref_um, k_main * sigma_hf, eff_main_floor_um)
 
         alpha_sce = float(getattr(params, "alpha_sce", 0.30))
-        eff_sce_floor_pct = min(t_abs_sce_pct, alpha_sce * a_ref_pct)
-        eff_sce_floor_um = min(t_abs_sce_um, alpha_sce * a_ref_um)
+        if a_ref_pct >= alpha_sce * t_abs_sce_pct:
+            eff_sce_floor_pct = min(t_abs_sce_pct, alpha_sce * a_ref_pct)
+            eff_sce_floor_um = min(t_abs_sce_um, alpha_sce * a_ref_um)
+        else:
+            eff_sce_floor_pct = t_abs_sce_pct
+            eff_sce_floor_um = t_abs_sce_um
         t_sce = max(eff_sce_floor_pct, k_sce * sigma_pct, 100.0 * eff_sce_floor_um / max(l0_med, 0.5))
         eff_abs_sce_um = max(eff_sce_floor_um, k_sce * sigma_hf)
     else:
@@ -597,8 +588,8 @@ def detect_sarcomere_contractions(
             events_df.loc[idx, "reason"] = "below_secondary_threshold"
             events_df.loc[idx, "event_class"] = "REJECTED"
         else:
-            # Valid candidate >= T_SCE
-            if float(r["pct_shortening"]) >= t_main and float(r["abs_shortening_um"]) >= eff_abs_main_um:
+            # Valid candidate >= T_SCE: strict amplitude hierarchy (pct >= t_main -> MAIN, else SECONDARY)
+            if float(r["pct_shortening"]) >= t_main:
                 events_df.loc[idx, "status"] = "ACCEPTED"
                 events_df.loc[idx, "event_class"] = "MAIN"
                 events_df.loc[idx, "reason"] = "accepted_isolated_spike_masked" if bool(r["artifact_nearby"]) else "accepted_main"
@@ -614,20 +605,6 @@ def detect_sarcomere_contractions(
 
     # Compute physiological diagnostics (takeoff baseline, interval dt, recovery ratio)
     events_df = classify_sarcomere_contractions(events_df, x_clean, fs, params)
-
-    # Mandatory invariant check: Strict amplitude hierarchy
-    for idx in events_df.index:
-        if events_df.loc[idx, "status"] == "ACCEPTED":
-            pct = float(events_df.loc[idx, "pct_shortening"])
-            if np.isfinite(pct):
-                if pct >= t_main:
-                    events_df.loc[idx, "event_class"] = "MAIN"
-                elif pct >= t_sce:
-                    events_df.loc[idx, "event_class"] = "SECONDARY"
-                else:
-                    events_df.loc[idx, "status"] = "REJECTED"
-                    events_df.loc[idx, "event_class"] = "REJECTED"
-                    events_df.loc[idx, "reason"] = "below_secondary_threshold" 
 
     events_df.attrs["detector_metrics"] = {
         "threshold_main_pct": float(t_main),

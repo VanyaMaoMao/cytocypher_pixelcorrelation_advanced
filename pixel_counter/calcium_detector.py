@@ -63,6 +63,7 @@ class CalciumDetectorParams:
     alpha_ref_sce: float = 0.28
     k_sce_sigma: float = 3.0
     min_norm_height_sce: float = 0.08
+    raw_prominence_sigma: Optional[float] = None
     is_adult_cardiomyocyte: bool = False
 
 
@@ -521,7 +522,11 @@ def detect_calcium_transients(
         ref_norm_amp = 0.50
         ref_prom = 0.05
 
-    noise_mult = params.min_prominence_sigma * 0.43
+    noise_mult = (
+        float(params.raw_prominence_sigma)
+        if getattr(params, "raw_prominence_sigma", None) is not None
+        else float(params.min_prominence_sigma * 0.43)
+    )
     prom_noise_floor = max(params.min_prominence_abs, noise_mult * raw_noise_sigma)
     eff_min_norm_height = max(params.min_norm_height, params.min_rel_amplitude * ref_norm_amp)
     eff_prominence = max(prom_noise_floor, params.min_rel_amplitude * ref_prom)
@@ -565,7 +570,12 @@ def detect_calcium_transients(
         t_main_cal = max(t_main_cal, t_sce_cal)
         eff_min_norm_height = t_main_cal
 
-        prom_noise_floor = max(params.min_prominence_abs, 2.85 * raw_noise_sigma)
+        adult_raw_sigma = (
+            float(params.raw_prominence_sigma)
+            if getattr(params, "raw_prominence_sigma", None) is not None
+            else 2.85
+        )
+        prom_noise_floor = max(params.min_prominence_abs, adult_raw_sigma * raw_noise_sigma)
         if ref_prom is not None and np.isfinite(ref_prom):
             eff_prominence = max(prom_noise_floor, min(params.min_rel_amplitude * ref_prom, 2.5 * raw_noise_sigma))
         else:
@@ -949,31 +959,26 @@ def evaluate_calcium_qc(
                     has_authentic_main = True
 
         if not has_authentic_main:
-            if noise_sigma > 0.020 and (max_ac_lag < 0.25 or snr < 3.2):
+            if (noise_sigma > 0.020 and (max_ac_lag < 0.25 or snr < 3.2)) or (
+                n_accepted > 0 and n_main == 0 and (noise_sigma > 0.012 or snr < 6.5)
+            ):
                 meta["rejection_category"] = "uninterpretable_noise"
                 return "REJECT", "uninterpretable_noise", meta
-
-        if n_accepted > 0 and n_main == 0 and n_accepted <= 2 and (noise_sigma > 0.012 or snr < 6.5):
-            meta["rejection_category"] = "uninterpretable_noise"
-            return "REJECT", "uninterpretable_noise", meta
-
-        if not has_authentic_main:
             if max_ac_lag < 0.10 and noise_sigma > 0.0035:
                 meta["rejection_category"] = "noise_dominated"
                 return "REJECT", "noise_dominated", meta
     else:
-        # If autocorrelation is low and noise floor is high, this is pure optical/electronic noise
-        # (e.g. SCRAMBLED ISO or ERROR-MOTION-CONTROLLER)
+        # Uncorrelated high-frequency optical/electronic noise check
         if max_ac_lag < 0.10 and noise_sigma > 0.0035:
             meta["rejection_category"] = "noise_dominated"
             return "REJECT", "noise_dominated", meta
 
-        # Severe uninterpretable noise check (e.g. IMR90 Seg 37)
+        # Severe high-noise floor with low signal periodicity or low transient SNR
         if noise_sigma > 0.020 and (max_ac_lag < 0.25 or snr < 3.2):
             meta["rejection_category"] = "uninterpretable_noise"
             return "REJECT", "uninterpretable_noise", meta
 
-    # If zero accepted events
+    # Zero accepted events: distinguish clean quiescent cell from high-noise floor
     if n_accepted == 0:
         if noise_sigma <= 0.0030:
             meta["quiescent"] = True
@@ -981,7 +986,7 @@ def evaluate_calcium_qc(
         meta["rejection_category"] = "uninterpretable_noise"
         return "REJECT", "uninterpretable_noise", meta
 
-    # Partial dropouts (e.g. DISH1CONTROL Seg 4, DISH2ICI Seg 7, 8)
+    # Partial sensor dropout exclusion
     if drop_frac > 0.02:
         return "PASS", "partial_sensor_dropout_excluded", meta
 
@@ -1015,8 +1020,12 @@ def analyze_calcium_pipeline(
     primary_noise: float = 0.001
     primary_dropout: Optional[np.ndarray] = None
 
-    for preset_name in ["default", "permissive", "strict"]:
-        p = preset_dict[preset_name]
+    preset_list = ["default", "permissive", "strict"]
+    if params is not None and params.preset_name not in preset_list:
+        preset_list.append(params.preset_name)
+
+    for preset_name in preset_list:
+        p = params if (params is not None and preset_name == params.preset_name) else preset_dict[preset_name]
         ev_df, base, n_sig, is_drop = detect_calcium_transients(sig_raw, fs, t0, p)
         qc_st, qc_rs, qc_meta = evaluate_calcium_qc(sig_raw, fs, ev_df, is_drop, n_sig, p)
 
@@ -1106,7 +1115,7 @@ def analyze_calcium_pipeline(
             mean_delta_r = float(np.mean(acc_dr))
             med_delta_r = float(np.median(acc_dr))
 
-    norm_waveform = compute_normalized_calcium(sig_raw, primary_baseline)
+    norm_waveform = compute_normalized_calcium(sig_raw, primary_baseline, primary_dropout)
 
     pipeline_metadata = {
         "channel": "RatioMetricCalcium",
